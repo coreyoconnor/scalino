@@ -1,0 +1,68 @@
+diff --git a/tools/src/main/scala/scala/scalanative/build/ScalaNative.scala b/tools/src/main/scala/scala/scalanative/build/ScalaNative.scala
+index cacbb68..a6a7877 100644
+--- a/tools/src/main/scala/scala/scalanative/build/ScalaNative.scala
++++ b/tools/src/main/scala/scala/scalanative/build/ScalaNative.scala
+@@ -54,7 +54,15 @@ private[scalanative] object ScalaNative {
+       ec: ExecutionContext
+   ): Future[ReachabilityAnalysis.Result] = {
+     import config.logger
+-    if (config.compilerConfig.optimize)
++    if (config.compilerConfig.optimize) {
++      // The classloading/Reach pass just completed (`analysis` is its
++      // result) and its own working structures (11 large maps/sets in
++      // `linker.Reach`, per real profiling on dotc's own NIR at ~77K
++      // reachable methods) are now garbage -- reclaim them before
++      // Interflow allocates its own comparably-sized `originals`/`done`
++      // maps on top, rather than leaving both stages' peak memory
++      // stacked on the GC's own collection heuristics.
++      System.gc()
+       logger.timeAsync(s"Optimizing (${config.mode} mode)") {
+         withReachabilityPostprocessing(
+           config,
+@@ -64,9 +72,20 @@ private[scalanative] object ScalaNative {
+         ) {
+           Interflow
+             .optimize(config, analysis)
+-            .map(Link(config, analysis.entries, _))
++            .map { optimizedDefns =>
++              // Same reasoning as above, other end of the Interflow stage:
++              // `originals`/`done`/`started`/`denylist`/`reached` are all
++              // dead the instant `Interflow.optimize` resolves (nothing
++              // downstream reads them, see `Interflow.result()`), and the
++              // very next line re-runs the entire Reach/Link pass again
++              // over `optimizedDefns` -- reclaim before that second pass
++              // allocates its own full set of large structures.
++              System.gc()
++              Link(config, analysis.entries, optimizedDefns)
++            }
+         }
+       }
++    }
+     else {
+       logger.info("Optimizing skipped")
+       Future.successful(analysis)
+diff --git a/tools/src/main/scala/scala/scalanative/interflow/Interflow.scala b/tools/src/main/scala/scala/scalanative/interflow/Interflow.scala
+index 7cb77f2..3fd6da8 100644
+--- a/tools/src/main/scala/scala/scalanative/interflow/Interflow.scala
++++ b/tools/src/main/scala/scala/scalanative/interflow/Interflow.scala
+@@ -181,9 +181,17 @@ private[scalanative] class Interflow(val config: build.Config)(implicit
+     blockFreshTl.set(blockFreshTl.get.tail)
+ 
+   def result(): Seq[nir.Defn] = {
+-    val optimized = originals.clone()
+-    optimized ++= done
+-    optimized.values.toSeq
++    // Was `originals.clone()` then merging `done` into the clone: this
++    // Interflow instance (and therefore `originals`) is discarded the
++    // instant this method returns (see `Interflow.optimize` below --
++    // `interflow` is never referenced again after `.result()`), so the
++    // clone was a second full-corpus-sized copy of `originals` with no
++    // downstream reader. Mutating in place removes that copy -- traced,
++    // via real profiling on dotc's own NIR (~77K reachable methods), to
++    // the exact site of an `Out of heap space` crash under scala-native's
++    // own GC linking something at that scale.
++    originals ++= done
++    originals.values.toSeq
+   }
+ 
+   protected def mode: build.Mode = config.compilerConfig.mode

@@ -1,0 +1,23 @@
+--- a/nativelib/src/main/resources/scala-native/gc/immix/Heap.c	2010-01-01 00:00:00
++++ b/nativelib/src/main/resources/scala-native/gc/immix/Heap.c	2026-09-08 10:38:01
+@@ -213,8 +213,19 @@
+                  blockCount, unavailableBlockCount, freeBlockCount,
+                  recycledBlockCount);
+ 
++    // The unavailable ratio alone must not force growth while free blocks
++    // are still abundant (free < 65%), otherwise a workload with a steadily
++    // growing live set keeps re-triggering growth even though most of the
++    // heap is free (see
++    // https://github.com/scala-native/scala-native/issues/2436). Matches
++    // real measurement on this project's own workload (self-hosted
++    // scalino-linkdriver linking dotc's own NIR): committed heap tracked
++    // process RSS at 94-98.6%, while real live-object bytes stayed at only
++    // 2-7% of committed heap at every sampled cycle -- i.e. growth was being
++    // driven by this ratio alone, not by genuine lack of free space.
+     return freeBlockCount * 2 < blockCount ||
+-           4 * unavailableBlockCount > blockCount;
++           (4 * unavailableBlockCount > blockCount &&
++            20 * freeBlockCount < 13 * blockCount);
+ }
+ 
+ void Heap_Recycle(Heap *heap) {
