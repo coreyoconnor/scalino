@@ -14,18 +14,21 @@
 #
 # Prereqs: 00b-setup-vendor.sh, 01-fetch-deps.sh, 01b-build-patched-javalib.sh,
 # 02-build-java-base.sh, 02b-gen-megaphase-overrides.sh,
-# 04-build-scalino-linkdriver.sh (scalino-linkdriver is used as the link step
-# here too -- it remains a GraalVM-native-image tool; see docs/findings.md's
-# cutover entry for why that one binary hasn't been self-hosted yet).
+# 04-build-scalino-linkdriver.sh (dotc's own link step below runs LinkDriver
+# directly on the JVM, the same way 04's own second step links LinkDriver
+# itself -- see the note above the link step for why; $DIST/scalino-linkdriver
+# is still required here, as the smoke test at the bottom links Hello.scala
+# with it).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./00-env.sh
 
-for f in compiler.cp nativelibs.cp nscplugin.cp nscplugin.jar.txt; do
+for f in compiler.cp tools.cp nativelibs.cp nscplugin.cp nscplugin.jar.txt; do
   [[ -f "$WORK/$f" ]] || { echo "missing $WORK/$f -- run build/01-fetch-deps.sh first" >&2; exit 1; }
 done
 [[ -f "$WORK/generated/MiniPhaseOverrides.scala" ]] || { echo "missing $WORK/generated/MiniPhaseOverrides.scala -- run build/02b-gen-megaphase-overrides.sh first" >&2; exit 1; }
 [[ -x "$DIST/scalino-linkdriver" ]] || { echo "missing $DIST/scalino-linkdriver -- run build/04-build-scalino-linkdriver.sh first" >&2; exit 1; }
+[[ -d "$WORK/driver-classes" ]] || { echo "missing $WORK/driver-classes -- run build/04-build-scalino-linkdriver.sh first" >&2; exit 1; }
 [[ -f "$DIST/java.base.jar" ]] || { echo "missing $DIST/java.base.jar -- run build/02-build-java-base.sh first" >&2; exit 1; }
 
 SELFHOST_DIR="$WORK/selfhost"
@@ -73,12 +76,25 @@ NSCPLUGIN_JAR="$(cat "$WORK/nscplugin.jar.txt")"
 # see docs/findings.md "Wiring in the real backend" for the full root cause.
 cp "$ROOT/build/selfhost/compiler.properties" "$NIR_OUT/compiler.properties"
 
-echo "== linking (scalino-linkdriver, entry point dotty.tools.dotc.Main) =="
+echo "== linking (LinkDriver, run on the JVM -- entry point dotty.tools.dotc.Main) =="
 rm -rf "$LINK_WORK"
 mkdir -p "$LINK_WORK"
 # scalino-linkdriver's classpath needs both the just-compiled NIR AND the
 # Scala-Native-cross-compiled stdlib the compiled code links against --
 # NIR_OUT alone has no java.lang.Object etc.
+#
+# Run LinkDriver's own main directly via java, not the compiled native
+# $DIST/scalino-linkdriver binary -- the same class 04-build-scalino-linkdriver.sh's
+# own second step already runs on the JVM to link LinkDriver itself. dotc's
+# real classpath here (NATIVELIBS_CP) is all real .jar files, and Scala
+# Native's javalib implements zero java.nio.file.spi.FileSystemProvider (no
+# "jar:" filesystem), so the native-compiled scalino-linkdriver binary can't
+# open them -- crashes with java.nio.file.ProviderNotFoundException in its
+# own linker.ClassLoader.fromDisk -> VirtualDirectory.jar. Running the exact
+# same LinkDriver code on a real JVM hits the JDK's own jar filesystem
+# provider instead, so it just works (LinkDriver.scala's extractJarIfNeeded
+# now also fixes this for the native binary itself -- see its doc comment --
+# but the JVM path sidesteps the issue entirely).
 #
 # --mode release-size: this was the released scalino-dotc binary's actual
 # shipped build (v0.0.1 shipped scala-native's *default* Mode -- debug --
@@ -87,15 +103,18 @@ mkdir -p "$LINK_WORK"
 # null-guard-elimination pass StackOverflowed there against dotc's
 # unusually large, heavily-branching methods (see docs/findings.md); this
 # entry point compiles the exact same dotc, so the same risk applies here.
-"$DIST/scalino-linkdriver" \
-  "$(to_native_path "$NIR_OUT")$CP_SEP$(cat "$NATIVELIBS_CP")" \
-  "$(to_native_path "$LINK_WORK")" \
-  dotty.tools.dotc.Main \
-  "$CLANG" \
-  "$CLANGPP" \
-  info \
-  --mode release-size \
-  --embed-resources
+DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools.cp")$CP_SEP$(to_native_path "$WORK/driver-classes")"
+"$JAVA" \
+  -cp "$DRIVER_CP" \
+    LinkDriver \
+    "$(to_native_path "$NIR_OUT")$CP_SEP$(cat "$NATIVELIBS_CP")" \
+    "$(to_native_path "$LINK_WORK")" \
+    dotty.tools.dotc.Main \
+    "$CLANG" \
+    "$CLANGPP" \
+    info \
+    --mode release-size \
+    --embed-resources
 
 BUILT="$LINK_WORK/dotty.tools.dotc.Main"
 [[ -f "$BUILT" ]] || { echo "link did not produce $BUILT" >&2; exit 1; }

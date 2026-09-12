@@ -1,8 +1,60 @@
 import scala.scalanative.build._
 import scala.scalanative.util.Scope
-import java.nio.file.Paths
+import java.nio.file.{Path, Paths}
+import java.io.{File, FileOutputStream, BufferedOutputStream}
+import java.util.zip.ZipFile
 
 object LinkDriver:
+  /** Scala Native's own javalib implements zero `java.nio.file.spi.FileSystemProvider`s
+   *  (no "jar:" zip filesystem) -- so when this program is itself linked into a
+   *  standalone native `scalino-linkdriver` binary (not run on a real JVM), handing
+   *  scala-native's `Build` API a real `.jar` classpath entry crashes with
+   *  `java.nio.file.ProviderNotFoundException` deep in its own
+   *  `linker.ClassLoader.fromDisk` -> `VirtualDirectory.jar` -> `FileSystems.newFileSystem`.
+   *  Every real classpath here (javalib_native0.5_3.jar etc.) is shipped as a jar, so
+   *  this isn't an edge case -- it's the default path. Side-step the NIO provider SPI
+   *  entirely: extract each jar up front via `java.util.zip.ZipFile` (which Scala
+   *  Native's javalib does implement, unlike NIO's provider mechanism) into a cache
+   *  directory keyed by path+size+mtime, and hand `Build` the extracted directory
+   *  instead -- `VirtualDirectory.real`'s directory-backed branch needs no
+   *  `FileSystemProvider` at all. Harmless, and just as correct, when run on a real
+   *  JVM too.
+   */
+  private def extractJarIfNeeded(p: Path): Path =
+    val f = p.toFile
+    if f.isFile && f.getName.endsWith(".jar") then
+      val key = s"${f.getAbsolutePath}-${f.length()}-${f.lastModified()}".hashCode
+      val cacheDir = new File(new File(System.getProperty("java.io.tmpdir"), "scalino-linkdriver-jarcache"), s"${f.getName}-${Integer.toHexString(key)}")
+      if !cacheDir.exists() then
+        val tmpDir = new File(cacheDir.getParentFile, cacheDir.getName + ".tmp-" + System.nanoTime())
+        tmpDir.mkdirs()
+        val zf = new ZipFile(f)
+        try
+          val entries = zf.entries()
+          while entries.hasMoreElements do
+            val e = entries.nextElement()
+            val outFile = new File(tmpDir, e.getName)
+            if e.isDirectory then outFile.mkdirs()
+            else
+              outFile.getParentFile.mkdirs()
+              val in = zf.getInputStream(e)
+              val out = new BufferedOutputStream(new FileOutputStream(outFile))
+              try
+                val buf = new Array[Byte](8192)
+                var n = in.read(buf)
+                while n >= 0 do
+                  out.write(buf, 0, n)
+                  n = in.read(buf)
+              finally
+                out.close()
+                in.close()
+        finally zf.close()
+        // Racing with another process extracting the same jar just means one
+        // rename loses -- both produce identical content, so either survives fine.
+        tmpDir.renameTo(cacheDir)
+      cacheDir.toPath
+    else p
+
   /** `Logger.default` (used unconditionally before) always prints debug/trace
    *  (raw clang invocations, full NativeConfig dumps) to stderr, with no way
    *  to dial it down -- scalino now passes its own resolved log level as an
@@ -66,7 +118,7 @@ object LinkDriver:
     // a hardcoded ":" shatters a real Windows path at its own drive-letter
     // colon ("C:\..."), producing garbage entries and "Discovered 0 classes"
     // no matter how correct each individual path string already is.
-    val cp = args(0).split(java.io.File.pathSeparator).toSeq.map(Paths.get(_))
+    val cp = args(0).split(java.io.File.pathSeparator).toSeq.map(s => extractJarIfNeeded(Paths.get(s)))
     val workDir = Paths.get(args(1))
     val mainClass = args(2)
     val logLevel = if args.length > 5 then args(5) else "info"
