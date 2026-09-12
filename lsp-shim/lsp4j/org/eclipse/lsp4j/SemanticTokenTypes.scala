@@ -1,0 +1,28 @@
+package org.eclipse.lsp4j
+
+object SemanticTokenTypes {
+  val Namespace = "namespace"
+  val Type = "type"
+  val Class = "class"
+  val Enum = "enum"
+  val Interface = "interface"
+  val Struct = "struct"
+  val TypeParameter = "typeParameter"
+  val Parameter = "parameter"
+  val Variable = "variable"
+  val Property = "property"
+  val EnumMember = "enumMember"
+  val Event = "event"
+  val Function = "function"
+  val Method = "method"
+  val Macro = "macro"
+  val Keyword = "keyword"
+  val Modifier = "modifier"
+  val Comment = "comment"
+  val String = "string"
+  val Number = "number"
+  val Regexp = "regexp"
+  val Operator = "operator"
+  val Decorator = "decorator"
+  val Label = "label"
+}

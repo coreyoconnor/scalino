@@ -1,0 +1,39 @@
+diff --git a/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala b/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala
+index a4257241..3ddf1f14 100644
+--- a/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala
++++ b/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala
+@@ -53,7 +53,7 @@ class CachingDriver private (
+       case _ => false
+ 
+   override def run(uri: URI, source: SourceFile): List[Diagnostic] =
+-    if !alreadyCompiled(uri, source.content) then previousDiags = super.run(uri, source)
++    if !alreadyCompiled(uri, source.content()) then previousDiags = super.run(uri, source)
+     lastCompiledURI = uri
+     previousDiags
+ 
+diff --git a/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala b/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala
+index 60ef2681..4384ba8a 100644
+--- a/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala
++++ b/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala
+@@ -122,7 +122,7 @@ object OverrideCompletions:
+           shouldMoveCursor = true,
+           config,
+           autoImportsGen,
+-          indexedContext.ctx.compilationUnit.source.content
++          indexedContext.ctx.compilationUnit.source.content()
+             .startsWith("o", start)
+         )
+       )
+diff --git a/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala b/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala
+index 22baa696..61b9a826 100644
+--- a/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala
++++ b/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala
+@@ -206,7 +206,7 @@ object InteractiveEnrichments extends CommonMtagsEnrichments:
+       sym.sourcePos.span.exists && {
+         val source = ctx.source
+         if (source ne sym.source) && source.path == sym.source.path then
+-          !source.content.startsWith(
++          !source.content().startsWith(
+             sym.decodedName.toString(),
+             sym.sourcePos.span.point
+           )
