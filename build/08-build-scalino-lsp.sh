@@ -23,11 +23,12 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./00-env.sh
 
-for f in compiler.cp nativelibs.cp nscplugin.cp nscplugin.jar.txt lsp.cp; do
+for f in compiler.cp tools.cp nativelibs.cp nscplugin.cp nscplugin.jar.txt lsp.cp; do
   [[ -f "$WORK/$f" ]] || { echo "missing $WORK/$f -- run build/01-fetch-deps.sh first" >&2; exit 1; }
 done
 [[ -f "$WORK/generated/MiniPhaseOverrides.scala" ]] || { echo "missing $WORK/generated/MiniPhaseOverrides.scala -- run build/02b-gen-megaphase-overrides.sh first" >&2; exit 1; }
 [[ -x "$DIST/scalino-linkdriver" ]] || { echo "missing $DIST/scalino-linkdriver -- run build/04-build-scalino-linkdriver.sh first" >&2; exit 1; }
+[[ -d "$WORK/driver-classes" ]] || { echo "missing $WORK/driver-classes -- run build/04-build-scalino-linkdriver.sh first" >&2; exit 1; }
 
 SELFHOST_DIR="$WORK/selfhost"
 mkdir -p "$SELFHOST_DIR"
@@ -90,36 +91,28 @@ NSCPLUGIN_JAR="$(cat "$WORK/nscplugin.jar.txt")"
 # lazy-val version sniff).
 cp "$ROOT/build/selfhost/compiler.properties" "$NIR_OUT/compiler.properties"
 
-echo "== linking (scalino-linkdriver, entry point dotty.tools.languageserver.Main, --mode release-fast) =="
+echo "== linking (LinkDriver, run on the JVM -- entry point dotty.tools.languageserver.Main, --mode release-fast) =="
 rm -rf "$LINK_WORK"
 mkdir -p "$LINK_WORK"
-# -Xss64m: scalino-linkdriver itself (a GraalVM native-image tool, not the
-# self-hosted binary being produced) can StackOverflow in its own
-# release-fast null-guard-elimination pass against dotc's unusually large,
-# heavily-branching methods -- see docs/findings.md's release-fast section.
-# release-fast itself is needed for the `definition` endpoint's latency
-# (~40s debug-mode, ~10s release-fast on a fast runner). GitHub's own
-# macos-x86_64 runners are dramatically slower for this specific
-# interactive-compiler workload than every other platform this same job
-# runs on (linux-x86_64/linux-arm64/macos-arm64 all stay comfortably fast) --
-# confirmed NOT to be a fixable algorithmic issue: a real redundant-work bug
-# in Symbol#upgradedSource's sources-jar lookup was found and fixed
-# (patches/scala3-0014's sourcesJarExistsCache) and measurably helped
-# (completion() went from a hard timeout to succeeding), but definition()
-# alone still took on the order of 90-100s of real server time there
-# afterward -- an inherent hardware/virtualization speed ceiling on that
-# runner class for this workload, not something more code can fix.
-# lsp-trace-drive.py's client timeout: 25s -> 60s -> 150s, each bump driven
-# by an actual observed run on that runner, not guessed headroom.
-"$DIST/scalino-linkdriver" \
-  "$(to_native_path "$NIR_OUT")$CP_SEP$(cat "$NATIVELIBS_CP")$CP_SEP$LSP_NATIVE_CP" \
-  "$(to_native_path "$LINK_WORK")" \
-  dotty.tools.languageserver.Main \
-  "$CLANG" \
-  "$CLANGPP" \
-  info \
-  --mode release-fast \
-  --embed-resources
+# Run LinkDriver's own main directly via java, not the compiled native
+# $DIST/scalino-linkdriver binary -- see 03-build-scalino-dotc.sh's identical
+# link step for the full rationale (jar-filesystem-provider crash on the
+# native binary). Here it's also a hard requirement, not just a nicety: the
+# native scalino-linkdriver binary OOMs against the LSP's larger link graph
+# ("[ScalaNative GC|Error] Out of heap space grow heap"), where the JVM just
+# uses however much heap it needs.
+DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools.cp")$CP_SEP$(to_native_path "$WORK/driver-classes")"
+"$JAVA" \
+  -cp "$DRIVER_CP" \
+    LinkDriver \
+    "$(to_native_path "$NIR_OUT")$CP_SEP$(cat "$NATIVELIBS_CP")$CP_SEP$LSP_NATIVE_CP" \
+    "$(to_native_path "$LINK_WORK")" \
+    dotty.tools.languageserver.Main \
+    "$CLANG" \
+    "$CLANGPP" \
+    info \
+    --mode release-fast \
+    --embed-resources
 
 BUILT="$LINK_WORK/dotty.tools.languageserver.Main"
 [[ -f "$BUILT" ]] || { echo "link did not produce $BUILT" >&2; exit 1; }
