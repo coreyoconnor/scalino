@@ -1769,8 +1769,9 @@ object ScalinoCli:
         val mainClass = buildBinary(expanded, explicitMainClass, extraClasspath, binPathFor, options, extraCompileOnlyClasspath, o.logLevel, !o.noIncremental, nativeOpts)
         runInherited(binPathFor(mainClass).toString :: o.progArgs)
       case "package" =>
-        val outPath = Paths.get(o.out.getOrElse(fail("-o <output> is required for `scalino package`")))
-        val mainClass = buildBinary(expanded, explicitMainClass, extraClasspath, _ => outPath, options, extraCompileOnlyClasspath, o.logLevel, !o.noIncremental, nativeOpts)
+        def outPathFor(mc: String): Path = Paths.get(o.out.getOrElse(mc.substring(mc.lastIndexOf('.') + 1)))
+        val mainClass = buildBinary(expanded, explicitMainClass, extraClasspath, outPathFor, options, extraCompileOnlyClasspath, o.logLevel, !o.noIncremental, nativeOpts)
+        val outPath = outPathFor(mainClass)
         if !o.quiet then println(s"scalino: wrote $outPath (main class: $mainClass)")
         0
       case "compile" =>
