@@ -1462,6 +1462,23 @@ object ScalinoCli:
       cppCompile = directives.nativeCppCompile ++ o.cliNativeCppCompile
     )
 
+  /** The compile-only half of a build: parses/resolves nothing itself (that's
+   *  already done by the caller), just runs sources through scalino-dotc and
+   *  returns the resulting classesDir -- no entry-point detection, no link
+   *  step. Shared by `scalino compile` (which stops here) and `buildBinary`
+   *  (which goes on to link). */
+  def compileOnly(
+    sources: List[Path],
+    extraClasspath: String,
+    extraOptions: List[String] = Nil,
+    extraCompileOnlyClasspath: String = "",
+    incremental: Boolean = true
+  ): Path =
+    val classesDir = Paths.get(".scalino-build", "_scratch", "classes")
+    val cc = computeCompileClasspath(extraClasspath, extraCompileOnlyClasspath)
+    compileToClasses(sources, classesDir, cc, extraOptions, incremental)
+    classesDir
+
   def buildBinary(
     sources: List[Path],
     explicitMainClass: Option[String],
@@ -1473,9 +1490,8 @@ object ScalinoCli:
     incremental: Boolean = true,
     nativeOpts: NativeOpts = NativeOpts()
   ): String =
-    val classesDir = Paths.get(".scalino-build", "_scratch", "classes")
+    val classesDir = compileOnly(sources, extraClasspath, extraOptions, extraCompileOnlyClasspath, incremental)
     val cc = computeCompileClasspath(extraClasspath, extraCompileOnlyClasspath)
-    compileToClasses(sources, classesDir, cc, extraOptions, incremental)
 
     val mainClass = detectMainClass(classesDir, explicitMainClass)
     val linkDir = Paths.get(".scalino-build").resolve(mainClass).resolve("link")
@@ -1541,9 +1557,8 @@ object ScalinoCli:
          |usage:
          |  scalino <sources...>                   run (default command)
          |  scalino run <sources...> [options]     compile and run
-         |  scalino compile <sources...> [options] -o <out>   compile to a native binary
-         |                                     (alias: package -- unlike real scala-cli,
-         |                                     there's no separate typecheck-only mode)
+         |  scalino compile <sources...> [options]   compile only, no link (see build output)
+         |  scalino package <sources...> [options] -o <out>   compile and link a native binary
          |  scalino test <sources...> [options] [-- <framework args>]   compile and run tests
          |  scalino setup-ide <sources...> [options]   write .scalino-build/scalino-lsp.json for editor LSP support
          |  scalino version                        print version info
@@ -1576,7 +1591,7 @@ object ScalinoCli:
          |  --args-file <path>         expand to the file's contents as extra scalac options
          |                             (dotc's own native `@file` response-file expansion --
          |                             one option per line, `#` starts a line comment)
-         |  -o, --output <path>        output path (compile only)
+         |  -o, --output <path>        output path (package only)
          |  -v, --verbose              show full build-tool debug output (raw clang/linker invocations)
          |  -q, --quiet                only show warnings/errors
          |  --test-framework <class>   explicit test framework class (skips auto-detection; test only)
@@ -1753,10 +1768,14 @@ object ScalinoCli:
         def binPathFor(mc: String): Path = Paths.get(".scalino-build").resolve(mc).resolve("bin")
         val mainClass = buildBinary(expanded, explicitMainClass, extraClasspath, binPathFor, options, extraCompileOnlyClasspath, o.logLevel, !o.noIncremental, nativeOpts)
         runInherited(binPathFor(mainClass).toString :: o.progArgs)
-      case "compile" =>
-        val outPath = Paths.get(o.out.getOrElse(fail("-o <output> is required for `scalino compile`")))
+      case "package" =>
+        val outPath = Paths.get(o.out.getOrElse(fail("-o <output> is required for `scalino package`")))
         val mainClass = buildBinary(expanded, explicitMainClass, extraClasspath, _ => outPath, options, extraCompileOnlyClasspath, o.logLevel, !o.noIncremental, nativeOpts)
         if !o.quiet then println(s"scalino: wrote $outPath (main class: $mainClass)")
+        0
+      case "compile" =>
+        compileOnly(expanded, extraClasspath, options, extraCompileOnlyClasspath, !o.noIncremental)
+        if !o.quiet then println(s"scalino: compiled ${expanded.size} source(s)")
         0
 
   /** Polls source mtimes every 500ms and reruns `attempt` on change --
@@ -2001,14 +2020,15 @@ object ScalinoCli:
       case "-h" | "--help" => printUsage(System.out)
       case "--version" | "version" => printVersion()
       case "run" => handleRunOrCompile("run", args.drop(1))
-      // Note: unlike real scala-cli, `compile` here always links a native binary
-      // (there's no separate typecheck-only mode) -- `package` is the name real
-      // scala-cli uses for that, so accept it too rather than only the surprising name.
-      case "compile" | "package" => handleRunOrCompile("compile", args.drop(1))
+      // `compile` only compiles (like real scala-cli's `compile .`): no link
+      // step, no native binary, no -o requirement. `package` is the one that
+      // links a native binary and requires -o.
+      case "compile" => handleRunOrCompile("compile", args.drop(1))
+      case "package" => handleRunOrCompile("package", args.drop(1))
       case "test" => handleTest(args.drop(1))
       case "setup-ide" => handleSetupIde(args.drop(1))
       case cmd if unsupportedCommands(cmd) =>
-        die(s"'$cmd' is not implemented in this minimal scala-cli-alike -- supported: run, compile, test, setup-ide, version")
+        die(s"'$cmd' is not implemented in this minimal scala-cli-alike -- supported: run, compile, package, test, setup-ide, version")
       case first if first.startsWith("-") || Files.exists(Paths.get(first)) =>
         handleRunOrCompile("run", args) // implicit `run`, e.g. `scalino Foo.scala`
       case other =>
