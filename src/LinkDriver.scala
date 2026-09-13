@@ -164,6 +164,7 @@ object LinkDriver:
           .withBuildTarget(target)
           .withEmbedResources(opts.embedResources)
           .withMultithreading(if opts.multithreading then Some(true) else None)
+          .withSourceLevelDebuggingConfig(SourceLevelDebuggingConfig.enabled)
       )
 
     val outPath = Scope.apply[java.nio.file.Path] { (s: Scope) =>
