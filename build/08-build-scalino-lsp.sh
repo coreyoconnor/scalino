@@ -111,7 +111,7 @@ DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools.cp")$CP_SEP$(to_n
     "$CLANG" \
     "$CLANGPP" \
     info \
-    --mode release-fast \
+    --mode release-size \
     --embed-resources
 
 BUILT="$LINK_WORK/dotty.tools.languageserver.Main"
