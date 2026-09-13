@@ -5,6 +5,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 ./01-fetch-deps.sh
 ./01b-build-patched-javalib.sh
 ./02-build-java-base.sh
+./02a-build-compiler-patched.sh
 ./02b-gen-megaphase-overrides.sh
 # Must run before 03/03b/07/08: they all link against dist/scalino-linkdriver
 # as their own link step.

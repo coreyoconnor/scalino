@@ -1,8 +1,8 @@
 diff --git a/compiler/src/dotty/tools/dotc/interactive/Completion.scala b/compiler/src/dotty/tools/dotc/interactive/Completion.scala
-index e3570795..ff3887b3 100644
+index ed1171c8..c66b24f8 100644
 --- a/compiler/src/dotty/tools/dotc/interactive/Completion.scala
 +++ b/compiler/src/dotty/tools/dotc/interactive/Completion.scala
-@@ -35,8 +35,6 @@ import dotty.tools.dotc.core.Constants
+@@ -34,8 +34,6 @@ import dotty.tools.dotc.core.Constants
  import dotty.tools.dotc.core.TypeOps
  import dotty.tools.dotc.core.StdNames
  
@@ -11,7 +11,7 @@ index e3570795..ff3887b3 100644
  /**
   * One of the results of a completion query.
   *
-@@ -50,7 +48,13 @@ case class Completion(label: String, description: String, symbols: List[Symbol])
+@@ -49,7 +47,14 @@ case class Completion(label: String, description: String, symbols: List[Symbol])
  
  object Completion:
  
@@ -23,6 +23,7 @@ index e3570795..ff3887b3 100644
 +  // correct substitute on every backend, not just a Scala-Native workaround.
 +  private object logger:
 +    def warning(msg: String): Unit = System.err.println(s"[warning] $msg")
++    def fine(msg: String): Unit = System.err.println(s"[fine] $msg")
  
-   def scopeContext(pos: SourcePosition)(using Context): CompletionResult =
-     val tpdPath = Interactive.pathTo(ctx.compilationUnit.tpdTree, pos.span)
+   def scopeContext(pos: SourcePosition, tpdPath: List[tpd.Tree], completionContext: Context)(using Context): CompletionResult =
+     inContext(completionContext):

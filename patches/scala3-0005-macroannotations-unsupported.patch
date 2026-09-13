@@ -1,21 +1,22 @@
 diff --git a/compiler/src/dotty/tools/dotc/transform/MacroAnnotations.scala b/compiler/src/dotty/tools/dotc/transform/MacroAnnotations.scala
-index fd901032..7073a50f 100644
+index af90362e..3c8a8427 100644
 --- a/compiler/src/dotty/tools/dotc/transform/MacroAnnotations.scala
 +++ b/compiler/src/dotty/tools/dotc/transform/MacroAnnotations.scala
-@@ -16,12 +16,6 @@ import core.Symbols.*
+@@ -13,12 +13,7 @@ import core.MacroClassLoader
+ import core.Symbols.*
  import core.Types.*
  import quoted.*
- import util.SrcPos
--import scala.quoted.runtime.impl.{QuotesImpl, SpliceScope}
 -
+-import scala.quoted.runtime.impl.{QuotesImpl, SpliceScope}
 -import scala.quoted.Quotes
 -import scala.util.control.NonFatal
 -
 -import java.lang.reflect.InvocationTargetException
++import util.SrcPos
  
  object MacroAnnotations:
  
-@@ -89,64 +83,25 @@ object MacroAnnotations:
+@@ -87,66 +82,25 @@ object MacroAnnotations:
        (result, transformedCompanion)
    end expandAnnotations
  
@@ -78,6 +79,8 @@ index fd901032..7073a50f 100644
 -            (List(tree), companion)
 -          case Interpreter.MissingClassValidInCurrentRun(sym, origin) =>
 -            Interpreter.suspendOnMissing(sym, origin, annot.tree)
+-          // We're dealing with user-thrown things here, so we must use NonFatal to catch anything realistic,
+-          // including `Error`s like `NotImplementedError`
 -          case NonFatal(ex) =>
 -            val stack0 = ex.getStackTrace.takeWhile(_.getClassName != this.getClass().getName())
 -            val stack = stack0.take(1 + stack0.lastIndexWhere(_.getMethodName == "transform"))

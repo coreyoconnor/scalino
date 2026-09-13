@@ -11,5 +11,5 @@ package scala.scalanative.nir
 // file's SCALA_NATIVE_VERSION/SCALA_VERSION ever changes.
 object ScalaNativeBuildInfo {
   val version: String = "0.5.12"
-  val scalaVersion: String = "3.8.4"
+  val scalaVersion: String = "3.9.0"
 }

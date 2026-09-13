@@ -1,47 +1,8 @@
-diff --git a/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala b/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala
-index a4257241..3ddf1f14 100644
---- a/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala
-+++ b/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala
-@@ -53,7 +53,7 @@ class CachingDriver private (
-       case _ => false
- 
-   override def run(uri: URI, source: SourceFile): List[Diagnostic] =
--    if !alreadyCompiled(uri, source.content) then previousDiags = super.run(uri, source)
-+    if !alreadyCompiled(uri, source.content()) then previousDiags = super.run(uri, source)
-     lastCompiledURI = uri
-     previousDiags
- 
-diff --git a/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala b/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala
-index 60ef2681..4384ba8a 100644
---- a/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala
-+++ b/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala
-@@ -122,7 +122,7 @@ object OverrideCompletions:
-           shouldMoveCursor = true,
-           config,
-           autoImportsGen,
--          indexedContext.ctx.compilationUnit.source.content
-+          indexedContext.ctx.compilationUnit.source.content()
-             .startsWith("o", start)
-         )
-       )
-diff --git a/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala b/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala
-index 22baa696..61b9a826 100644
---- a/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala
-+++ b/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala
-@@ -206,7 +206,7 @@ object InteractiveEnrichments extends CommonMtagsEnrichments:
-       sym.sourcePos.span.exists && {
-         val source = ctx.source
-         if (source ne sym.source) && source.path == sym.source.path then
--          !source.content.startsWith(
-+          !source.content().startsWith(
-             sym.decodedName.toString(),
-             sym.sourcePos.span.point
-           )
 diff --git a/compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala b/compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala
-index 475c2520..ea386f2d 100644
+index c8d9a9e9..e8a9bd0f 100644
 --- a/compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala
 +++ b/compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala
-@@ -169,8 +169,8 @@ private[semanticdb] object ExtractSemanticDB:
+@@ -167,8 +167,8 @@ private[semanticdb] object ExtractSemanticDB:
        schema = Schema.SEMANTICDB4,
        language = Language.SCALA,
        uri = Tools.mkURIstring(Paths.get(relPath(source, sourceRoot))),
@@ -73,3 +34,42 @@ index f96a4839..b30ecfdb 100644
  
  
    // def pprint(tree: s.Tree, range: Option[Range]): String =
+diff --git a/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala b/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala
+index 352157bd..84dc8ff6 100644
+--- a/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala
++++ b/presentation-compiler/src/main/dotty/tools/pc/CachingDriver.scala
+@@ -52,7 +52,7 @@ class CachingDriver private (
+       case _ => false
+ 
+   override def run(uri: URI, source: SourceFile): List[Diagnostic] =
+-    if !alreadyCompiled(uri, source.content) then previousDiags = super.run(uri, source)
++    if !alreadyCompiled(uri, source.content()) then previousDiags = super.run(uri, source)
+     lastCompiledURI = uri
+     previousDiags
+ 
+diff --git a/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala b/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala
+index 3d9f48fd..ef3e83a7 100644
+--- a/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala
++++ b/presentation-compiler/src/main/dotty/tools/pc/completions/OverrideCompletions.scala
+@@ -120,7 +120,7 @@ object OverrideCompletions:
+           shouldMoveCursor = true,
+           config,
+           autoImportsGen,
+-          indexedContext.ctx.compilationUnit.source.content
++          indexedContext.ctx.compilationUnit.source.content()
+             .startsWith("o", start)
+         )
+       )
+diff --git a/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala b/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala
+index 1f2e10f2..25ebcd15 100644
+--- a/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala
++++ b/presentation-compiler/src/main/dotty/tools/pc/utils/InteractiveEnrichments.scala
+@@ -193,7 +193,7 @@ object InteractiveEnrichments extends CommonMtagsEnrichments:
+       sym.sourcePos.span.exists && {
+         val source = ctx.source
+         if (source ne sym.source) && source.path == sym.source.path then
+-          !source.content.startsWith(
++          !source.content().startsWith(
+             sym.decodedName.toString(),
+             sym.sourcePos.span.point
+           )

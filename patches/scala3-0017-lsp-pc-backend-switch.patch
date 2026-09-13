@@ -1,17 +1,24 @@
 diff --git a/language-server/src/dotty/tools/languageserver/DottyLanguageServer.scala b/language-server/src/dotty/tools/languageserver/DottyLanguageServer.scala
 deleted file mode 100644
-index 1d8a2330..00000000
+index c767d77e..00000000
 --- a/language-server/src/dotty/tools/languageserver/DottyLanguageServer.scala
 +++ /dev/null
-@@ -1,913 +0,0 @@
+@@ -1,973 +0,0 @@
 -package dotty.tools
 -package languageserver
 -
 -import java.net.URI
 -import java.io._
 -import java.nio.file._
+-import java.util.concurrent.{CompletableFuture, ConcurrentHashMap}
+-import java.util.function.Function
+-
+-import _root_.tools.jackson.databind.json.JsonMapper
+-
+-import org.eclipse.lsp4j
 -
 -import scala.collection._
+-import scala.jdk.CollectionConverters._
 -import scala.util.control.NonFatal
 -import scala.io.Codec
 -import scala.compiletime.uninitialized
@@ -29,42 +36,36 @@ index 1d8a2330..00000000
 -import Interactive.Include
 -import config.Printers.interactiv
 -
--import com.github.plokhotnyuk.jsoniter_scala.core._
--// `Diagnostic` and `Range` collide with dotc's own `reporting.Diagnostic`/
--// `core.Types.Range` (both already in scope via the imports above) --
--// hidden from this wildcard import and referenced fully-qualified
--// (`Lsp.Diagnostic`/`Lsp.Range`) at the handful of sites that need the
--// wire type instead of the compiler-internal one.
--import Lsp.{Diagnostic => _, Range => _, given, _}
+-import languageserver.config.ProjectConfig
+-import languageserver.worksheet.{Worksheet, WorksheetService}
+-import languageserver.decompiler.TastyDecompilerService
+-import org.eclipse.lsp4j.jsonrpc.messages.Either
 -
--/** A from-scratch, hand-rolled implementation of the Language Server
-- *  Protocol for Dotty -- no lsp4j, no Gson/Jackson, no runtime reflection.
+-import lsp4j.services._
+-
+-/** An implementation of the Language Server Protocol for Dotty.
 - *
-- *  You should not have to directly use this class, instead see
-- *  `dotty.tools.languageserver.Main`, which owns the actual JSON-RPC
-- *  transport (framing, dispatch, request/response encoding via `Lsp`'s
-- *  hand-written jsoniter-scala codecs) and calls into the plain methods
-- *  below synchronously.
+- *  You should not have to directly this class, instead see `dotty.tools.languageserver.Main`.
 - *
 - *  For more information see:
 - *  - The LSP is defined at https://github.com/Microsoft/language-server-protocol
-- *
-- *  Previously based on lsp4j (https://github.com/eclipse/lsp4j); replaced
-- *  after discovering a GraalVM native-image-specific pathology where Gson's
-- *  reflective `TypeAdapter` construction for a real editor's full-sized
-- *  `initialize` capabilities payload silently never completed under
-- *  native-image (worked fine under a real JVM with the identical bytes/
-- *  classes) -- see docs/findings.md "JVM-free language server (LSP)".
-- *
-- *  @param publishDiagnostics Callback invoked to send a
-- *    `textDocument/publishDiagnostics` notification to the client.
+- *  - This implementation is based on the LSP4J library: https://github.com/eclipse/lsp4j
 - */
--class DottyLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Unit) { thisServer =>
+-class DottyLanguageServer extends LanguageServer
+-    with TextDocumentService with WorkspaceService with WorksheetService with TastyDecompilerService { thisServer =>
 -  import ast.tpd._
+-
 -  import DottyLanguageServer._
 -  import InteractiveDriver._
 -
+-  import lsp4j.jsonrpc.{CancelChecker, CompletableFutures}
+-  import lsp4j.jsonrpc.messages.{Either => JEither}
+-  import lsp4j._
+-
 -  private var rootUri: String = uninitialized
+-
+-  private var myClient: DottyClient = uninitialized
+-  def client: DottyClient = myClient
 -
 -  private var myDrivers: mutable.Map[ProjectConfig, InteractiveDriver] = uninitialized
 -
@@ -74,18 +75,8 @@ index 1d8a2330..00000000
 -    if myDrivers == null then
 -      assert(rootUri != null, "`drivers` cannot be called before `initialize`")
 -      val configFile = new File(new URI(rootUri + '/' + IDE_CONFIG_FILE))
--      // Unlike Metals (which bootstraps this file itself via BSP before the
--      // language server ever starts), scalino's workflow requires a separate,
--      // explicit `scalino setup-ide` run first -- a real user is much more
--      // likely to open a project before running that than to hit a missing/
--      // corrupt config under the original Metals-oriented flow this code was
--      // written for. A clear, actionable message here (instead of a bare
--      // `NoSuchFileException` whose stack trace only reaches a log file the
--      // user never looks at) is worth the special case.
--      if !configFile.exists then
--        throw FileNotFoundException(
--          s"$IDE_CONFIG_FILE not found at $rootUri -- run `scalino setup-ide <sources...>` in the project root first")
--      val configs: List[ProjectConfig] = readFromArray(Files.readAllBytes(configFile.toPath))(using projectConfigListCodec)
+-      val configs: List[ProjectConfig] =
+-        JsonMapper.builder().build().readValue(configFile, classOf[Array[ProjectConfig]]).toList
 -
 -      val defaultFlags = List("-color:never" /*, "-Yplain-printer","-Yprint-pos"*/)
 -
@@ -100,25 +91,11 @@ index 1d8a2330..00000000
 -        }
 -        val settings =
 -          defaultFlags ++
--          config.compilerArguments
--            .update("-d", new File(config.classDirectory).getAbsolutePath)
+-          config.compilerArguments.toList
+-            .update("-d", config.classDirectory.getAbsolutePath)
 -            .update("-classpath", (config.classDirectory +: config.dependencyClasspath).mkString(File.pathSeparator))
 -            .update("-sourcepath", config.sourceDirectories.mkString(File.pathSeparator))
--        // One misconfigured project (e.g. a `dependencyClasspath` missing a
--        // real Scala library, which makes `InteractiveDriver`'s own
--        // `Definitions.init` throw `MissingCoreLibraryException`) must not
--        // take every *other* project in the same `.scalino-build/scalino-lsp.json` down
--        // with it: this whole loop runs from the async `initialize` warmup
--        // thread (see the crash fix above), so an uncaught exception here
--        // used to abort the loop after `myDrivers` was already assigned
--        // (but before any entry was added), silently leaving it cached as
--        // an empty map forever -- every later request would then fail with
--        // a confusing, unrelated-looking `NoSuchElementException` from
--        // `configFor`'s `drivers.keys.head` fallback, nowhere near the real
--        // cause (see docs/findings.md, "JVM-free language server (LSP)").
--        try myDrivers(config) = new InteractiveDriver(settings)
--        catch case NonFatal(ex) =>
--          Log(s"drivers: failed to construct driver for project '${config.id}': ${ex.getClass.getName}: ${ex.getMessage} -- this project will be unavailable")
+-        myDrivers(config) = new InteractiveDriver(settings)
 -      }
 -    myDrivers
 -  }
@@ -139,18 +116,17 @@ index 1d8a2330..00000000
 -
 -  private def checkMemory() =
 -    if Memory.isCritical() then
--      val t = new Thread(() => restart())
--      t.setDaemon(true)
--      t.start()
+-      CompletableFutures.computeAsync { _ => restart() }
 -
 -  /** The configuration of the project that owns `uri`. */
 -  def configFor(uri: URI): ProjectConfig = thisServer.synchronized {
 -    val config =
 -      drivers.keys.find(config => config.sourceDirectories.exists(sourceDir =>
--        new File(uri.getPath).getCanonicalPath.startsWith(new File(sourceDir).getCanonicalPath)))
+-        new File(uri.getPath).getCanonicalPath.startsWith(sourceDir.getCanonicalPath)))
 -
 -    config.getOrElse {
 -      val config = drivers.keys.head
+-      // println(s"No configuration contains $uri as a source file, arbitrarily choosing ${config.id}")
 -      config
 -    }
 -  }
@@ -160,7 +136,7 @@ index 1d8a2330..00000000
 -    drivers(configFor(uri))
 -  }
 -
--  /** The driver instance responsible for decompiling `uri` in `classPath` */
+-    /** The driver instance responsible for decompiling `uri` in `classPath` */
 -  def decompilerDriverFor(uri: URI, classPath: String): IDEDecompilerDriver = thisServer.synchronized {
 -    val config = configFor(uri)
 -    val defaultFlags = List("-color:never")
@@ -174,7 +150,7 @@ index 1d8a2330..00000000
 -    }
 -    val settings =
 -      defaultFlags ++
--      config.compilerArguments
+-      config.compilerArguments.toList
 -        .update("-classpath", (classPath +: config.dependencyClasspath).mkString(File.pathSeparator))
 -    new IDEDecompilerDriver(settings)
 -  }
@@ -198,88 +174,96 @@ index 1d8a2330..00000000
 -    myDependentProjects
 -  }
 -
--  /** Runs `fun` while holding this server's lock, converting a critical
--   *  memory condition into a background driver restart first (matching
--   *  the previous lsp4j-based `computeAsync`'s behavior, minus its
--   *  cancellation support -- nothing in this codebase ever checked a
--   *  cancel token, so dropping it changes nothing observable). */
--  def computeSync[R](fun: => R): R = {
--    checkMemory()
--    try
--      thisServer.synchronized { fun }
--    catch {
--      case NonFatal(ex) =>
--        ex.printStackTrace
--        throw ex
--    }
+-  def connect(client: DottyClient): Unit = {
+-    myClient = client
 -  }
 -
--  def initialize(rootUri: String): InitializeResult = computeSync {
--    this.rootUri = rootUri
+-  override def exit(): Unit = {
+-    System.exit(0)
+-  }
+-
+-  override def shutdown(): CompletableFuture[Object] = {
+-    CompletableFuture.completedFuture(new Object)
+-  }
+-
+-  def computeAsync[R](fun: CancelChecker => R, synchronize: Boolean = true): CompletableFuture[R] =
+-    CompletableFutures.computeAsync { cancelToken =>
+-      // We do not support any concurrent use of the compiler currently.
+-      def computation(): R = {
+-        cancelToken.checkCanceled()
+-        checkMemory()
+-        try {
+-          fun(cancelToken)
+-        } catch {
+-          case NonFatal(ex) =>
+-            ex.printStackTrace
+-            throw ex
+-        }
+-      }
+-      if synchronize then
+-        thisServer.synchronized { computation() }
+-      else
+-        computation()
+-    }
+-
+-  override def initialize(params: InitializeParams) = computeAsync { cancelToken =>
+-    rootUri = params.getRootUri
 -    assert(rootUri != null)
 -
--    val capabilities = ServerCapabilities(
--      textDocumentSync = 1, // Full
--      documentHighlightProvider = true,
--      documentSymbolProvider = true,
--      definitionProvider = true,
--      renameProvider = true,
--      hoverProvider = true,
--      workspaceSymbolProvider = true,
--      referencesProvider = true,
--      implementationProvider = true,
--      completionProvider = CompletionOptions(triggerCharacters = List(".")),
--      signatureHelpProvider = SignatureHelpOptions(triggerCharacters = List("(")))
+-    class DottyServerCapabilities(val worksheetRunProvider: Boolean = true,
+-                                  val tastyDecompiler: Boolean = true) extends lsp4j.ServerCapabilities
+-
+-    val c = new DottyServerCapabilities
+-    c.setTextDocumentSync(TextDocumentSyncKind.Full)
+-    c.setDocumentHighlightProvider(true)
+-    c.setDocumentSymbolProvider(true)
+-    c.setDefinitionProvider(true)
+-    c.setRenameProvider(true)
+-    c.setHoverProvider(true)
+-    c.setWorkspaceSymbolProvider(true)
+-    c.setReferencesProvider(true)
+-    c.setImplementationProvider(true)
+-    c.setCompletionProvider(new CompletionOptions(
+-      /* resolveProvider = */ false,
+-      /* triggerCharacters = */ List(".").asJava))
+-    c.setSignatureHelpProvider(new SignatureHelpOptions(
+-      /* triggerCharacters = */ List("(").asJava))
 -
 -    // Do most of the initialization asynchronously so that we can return early
 -    // from this method and thus let the client know our capabilities.
--    //
--    // On failure (most commonly: no scalino-lsp.json yet, see `drivers`'s own
--    // check), just log it and return -- NOT `sys.exit`, unlike the original
--    // lsp4j-based code this was ported from (faithfully preserved through the
--    // rewrite, but wrong for scalino specifically: under GraalVM native-image,
--    // an uncaught exception on ANY thread terminates the whole process, so
--    // this used to kill the entire editor connection on a missing config
--    // instead of just failing this one request). Leaving `myDrivers` unset
--    // means the SAME exception surfaces again, cleanly, the next time
--    // anything (didOpen, hover, ...) actually needs `drivers` -- and that
--    // path already goes through `Main.scala`'s own per-request try/catch,
--    // which reports it as a normal LSP error response instead of a crash.
--    val warmup = new Thread(() => {
--      try { drivers; () }
--      catch {
--        case NonFatal(ex) =>
--          ex.printStackTrace
+-    CompletableFuture.supplyAsync(() => drivers)
+-      .exceptionally { (ex: Throwable) =>
+-        ex.printStackTrace
+-        sys.exit(1)
 -      }
--    })
--    warmup.setDaemon(true)
--    warmup.start()
 -
--    InitializeResult(capabilities)
+-    new InitializeResult(c)
 -  }
 -
--  def didOpen(params: DidOpenTextDocumentParams): Unit = thisServer.synchronized {
+-  override def didOpen(params: DidOpenTextDocumentParams): Unit = thisServer.synchronized {
 -    checkMemory()
--    val document = params.textDocument
--    val uri = new URI(document.uri)
+-    val document = params.getTextDocument
+-    val uri = new URI(document.getUri)
 -    val driver = driverFor(uri)
 -    implicit def ctx: Context = driver.currentCtx
 -    val worksheetMode = isWorksheet(uri)
 -
 -    val text =
 -      if (worksheetMode)
--        wrapWorksheet(document.text)
+-        wrapWorksheet(document.getText)
 -      else
--        document.text
+-        document.getText
 -
 -    val diags = driver.run(uri, text)
 -
--    publishDiagnostics(document.uri, diags.flatMap(toLspDiagnostic))
+-    client.publishDiagnostics(new PublishDiagnosticsParams(
+-      document.getUri,
+-      diags.flatMap(DottyLanguageServer.diagnostic).asJava))
 -  }
 -
--  def didChange(params: DidChangeTextDocumentParams): Unit = {
--    val document = params.textDocument
--    val uri = new URI(document.uri)
+-  override def didChange(params: DidChangeTextDocumentParams): Unit = {
+-    val document = params.getTextDocument
+-    val uri = new URI(document.getUri)
 -    val worksheetMode = isWorksheet(uri)
 -
 -    thisServer.synchronized  {
@@ -288,35 +272,47 @@ index 1d8a2330..00000000
 -      val driver = driverFor(uri)
 -      implicit def ctx: Context = driver.currentCtx
 -
--      val change = params.contentChanges.head
--      assert(change.range.isEmpty, "TextDocumentSyncKind.Incremental support is not implemented")
+-      val change = params.getContentChanges.get(0)
+-      assert(change.getRange == null, "TextDocumentSyncKind.Incremental support is not implemented")
 -
 -      val text =
 -        if (worksheetMode)
--          wrapWorksheet(change.text)
+-          wrapWorksheet(change.getText)
 -        else
--          change.text
+-          change.getText
 -
 -      val diags = driver.run(uri, text)
 -
--      publishDiagnostics(document.uri, diags.flatMap(toLspDiagnostic))
+-      client.publishDiagnostics(new PublishDiagnosticsParams(
+-        document.getUri,
+-        diags.flatMap(DottyLanguageServer.diagnostic).asJava))
 -    }
 -  }
 -
--  def didClose(params: DidCloseTextDocumentParams): Unit = thisServer.synchronized {
--    val document = params.textDocument
--    val uri = new URI(document.uri)
+-  override def didClose(params: DidCloseTextDocumentParams): Unit = thisServer.synchronized {
+-    val document = params.getTextDocument
+-    val uri = new URI(document.getUri)
 -
 -    driverFor(uri).close(uri)
 -  }
 -
+-  override def didChangeConfiguration(params: DidChangeConfigurationParams): Unit =
+-    /*thisServer.synchronized*/ {}
+-
+-  override def didChangeWatchedFiles(params: DidChangeWatchedFilesParams): Unit =
+-    /*thisServer.synchronized*/ {}
+-
+-  override def didSave(params: DidSaveTextDocumentParams): Unit = {
+-    /*thisServer.synchronized*/ {}
+-  }
+-
 -  // FIXME: share code with NotAMember
--  def completion(params: TextDocumentPositionParams): CompletionList = computeSync {
--    val uri = new URI(params.textDocument.uri)
+-  override def completion(params: CompletionParams) = computeAsync { cancelToken =>
+-    val uri = new URI(params.getTextDocument.getUri)
 -    val driver = driverFor(uri)
 -    implicit def ctx: Context = driver.currentCtx
 -
--    val pos = sourcePosition(driver, uri, params.position)
+-    val pos = sourcePosition(driver, uri, params.getPosition)
 -    val items = driver.compilationUnits.get(uri) match {
 -      case Some(unit) =>
 -        val freshCtx = ctx.fresh.setCompilationUnit(unit)
@@ -324,37 +320,38 @@ index 1d8a2330..00000000
 -      case None => Nil
 -    }
 -
--    CompletionList(isIncomplete = false, items = items.map(completionItem))
+-    JEither.forRight(new CompletionList(
+-      /*isIncomplete = */ false, items.map(completionItem).asJava))
 -  }
 -
 -  /** If cursor is on a reference, show its definition and all overriding definitions.
 -   *  If cursor is on a definition, show this definition together with all overridden
 -   *  and overriding definitions.
 -   */
--  def definition(params: TextDocumentPositionParams): List[Location] = computeSync {
--    val uri = new URI(params.textDocument.uri)
+-  override def definition(params: DefinitionParams) = computeAsync { cancelToken =>
+-    val uri = new URI(params.getTextDocument.getUri)
 -    val driver = driverFor(uri)
 -    implicit def ctx: Context = driver.currentCtx
 -
--    val pos = sourcePosition(driver, uri, params.position)
+-    val pos = sourcePosition(driver, uri, params.getPosition)
 -    val path = Interactive.pathTo(driver.openedTrees(uri), pos)
 -
 -    val definitions = Interactive.findDefinitions(path, pos, driver).toList
--    definitions.flatMap(d => location(d.namePos))
+-    Either.forLeft(definitions.flatMap(d => location(d.namePos)).asJava)
 -  }
 -
--  def references(params: ReferenceParams): List[Location] = computeSync {
--    val uri = new URI(params.textDocument.uri)
+-  override def references(params: ReferenceParams) = computeAsync { cancelToken =>
+-    val uri = new URI(params.getTextDocument.getUri)
 -    val driver = driverFor(uri)
 -
 -    val includes = {
--      val includeDeclaration = params.context.includeDeclaration
+-      val includeDeclaration = params.getContext.isIncludeDeclaration
 -      Include.references | Include.overriding | Include.imports | Include.local |
 -        (if (includeDeclaration) Include.definitions else Include.empty)
 -    }
 -
 -    val uriTrees = driver.openedTrees(uri)
--    val pos = sourcePosition(driver, uri, params.position)
+-    val pos = sourcePosition(driver, uri, params.getPosition)
 -
 -    val (definitions, originalSymbols) = {
 -      implicit def ctx: Context = driver.currentCtx
@@ -380,21 +377,22 @@ index 1d8a2330..00000000
 -      }
 -    }.toList
 -
--    references.flatten.distinct
+-    references.flatten.distinct.asJava
 -  }
 -
--  def rename(params: RenameParams): WorkspaceEdit = computeSync {
--    val uri = new URI(params.textDocument.uri)
+-  override def rename(params: RenameParams) = computeAsync { cancelToken =>
+-    val uri = new URI(params.getTextDocument.getUri)
 -    val driver = driverFor(uri)
 -    implicit def ctx: Context = driver.currentCtx
 -
 -    val uriTrees = driver.openedTrees(uri)
--    val pos = sourcePosition(driver, uri, params.position)
+-    val pos = sourcePosition(driver, uri, params.getPosition)
 -    val path = Interactive.pathTo(uriTrees, pos)
 -    val syms = Interactive.enclosingSourceSymbols(path, pos)
--    val newName = params.newName
+-    val newName = params.getNewName
 -
 -    def findRenamedReferences(trees: List[SourceTree], syms: List[Symbol], withName: Name): List[SourceTree] = {
+-      val includes = Include.all
 -      syms.flatMap { sym =>
 -        Interactive.findTreesMatching(trees, Include.all, sym, t => Interactive.sameName(t.name, withName))
 -      }
@@ -411,17 +409,17 @@ index 1d8a2330..00000000
 -          findRenamedReferences(uriTrees, syms, nameTree.name)
 -
 -        case _ =>
--          // Previously an lsp4j `window/showMessageRequest` asked the user
--          // whether to also rename overridden/overriding members. Dropped
--          // along with the rest of lsp4j (that's a server-initiated
--          // request needing bidirectional correlation this hand-rolled
--          // transport doesn't implement) -- always include them, matching
--          // what was previously the first/default choice.
 -          val (include, allSymbols) =
--            if (syms.exists(_.allOverriddenSymbols.nonEmpty))
--              (Include.all, syms.flatMap(s => s :: s.allOverriddenSymbols.toList))
--            else
+-            if (syms.exists(_.allOverriddenSymbols.nonEmpty)) {
+-              showMessageRequest(MessageType.Info,
+-                RENAME_OVERRIDDEN_QUESTION,
+-                List(
+-                  RENAME_OVERRIDDEN    -> (() => (Include.all, syms.flatMap(s => s :: s.allOverriddenSymbols.toList))),
+-                  RENAME_NO_OVERRIDDEN -> (() => (Include.all.except(Include.overridden), syms)))
+-              ).get.getOrElse((Include.empty, Nil))
+-            } else {
 -              (Include.all, syms)
+-            }
 -
 -          val names = allSymbols.map(_.name.sourceModuleName).toSet
 -          val definitions = Interactive.findDefinitions(allSymbols, driver, include.isOverridden, includeExternal = true)
@@ -442,19 +440,18 @@ index 1d8a2330..00000000
 -    val changes =
 -      refs.groupBy(ref => toUriOption(ref.source))
 -        .flatMap { case (uriOpt, refs) => uriOpt.map(uri => (uri.toString, refs)) }
--        .map((uri, refs) => (uri, refs.flatMap(ref =>
--          range(ref.namePos).map(nameRange => TextEdit(nameRange, newName))).distinct))
--        .toMap
+-        .transform((_, refs) => refs.flatMap(ref =>
+-          range(ref.namePos).map(nameRange => new TextEdit(nameRange, newName))).distinct.asJava)
 -
--    WorkspaceEdit(changes)
+-    new WorkspaceEdit(changes.asJava)
 -  }
 -
--  def documentHighlight(params: TextDocumentPositionParams): List[DocumentHighlight] = computeSync {
--    val uri = new URI(params.textDocument.uri)
+-  override def documentHighlight(params: DocumentHighlightParams) = computeAsync { cancelToken =>
+-    val uri = new URI(params.getTextDocument.getUri)
 -    val driver = driverFor(uri)
 -    implicit def ctx: Context = driver.currentCtx
 -
--    val pos = sourcePosition(driver, uri, params.position)
+-    val pos = sourcePosition(driver, uri, params.getPosition)
 -    val uriTrees = driver.openedTrees(uri)
 -    val path = Interactive.pathTo(uriTrees, pos)
 -    val syms = Interactive.enclosingSourceSymbols(path, pos)
@@ -462,39 +459,39 @@ index 1d8a2330..00000000
 -
 -    syms.flatMap { sym =>
 -      val refs = Interactive.findTreesMatching(uriTrees, includes, sym)
--      for {
+-      (for {
 -        ref <- refs
 -        nameRange <- range(ref.namePos)
--      } yield DocumentHighlight(nameRange, /* Read */ 2)
--    }.distinct
+-      } yield new DocumentHighlight(nameRange, DocumentHighlightKind.Read))
+-    }.distinct.asJava
 -  }
 -
--  def hover(params: TextDocumentPositionParams): Option[Hover] = computeSync {
--    val uri = new URI(params.textDocument.uri)
+-  override def hover(params: HoverParams) = computeAsync { cancelToken =>
+-    val uri = new URI(params.getTextDocument.getUri)
 -    val driver = driverFor(uri)
 -    implicit def ctx: Context = driver.currentCtx
 -
--    val pos = sourcePosition(driver, uri, params.position)
+-    val pos = sourcePosition(driver, uri, params.getPosition)
 -    val trees = driver.openedTrees(uri)
 -    val path = Interactive.pathTo(trees, pos)
 -    val tp = Interactive.enclosingType(trees, pos)
 -    val tpw = tp.widenTermRefExpr
 -
--    if (tp.isError || tpw == NoType) None
+-    if (tp.isError || tpw == NoType) null // null here indicates that no response should be sent
 -    else {
 -      Interactive.enclosingSourceSymbols(path, pos) match {
 -        case Nil =>
--          None
+-          null
 -        case symbols =>
 -          val docComments = symbols.flatMap(ParsedComment.docOf)
 -          val content = hoverContent(Some(tpw.show), docComments)
--          content.map(Hover(_))
+-          new Hover(content, null)
 -      }
 -    }
 -  }
 -
--  def documentSymbol(params: DocumentSymbolParams): List[SymbolInformation] = computeSync {
--    val uri = new URI(params.textDocument.uri)
+-  override def documentSymbol(params: DocumentSymbolParams) = computeAsync { cancelToken =>
+-    val uri = new URI(params.getTextDocument.getUri)
 -    val driver = driverFor(uri)
 -    implicit def ctx: Context = driver.currentCtx
 -
@@ -511,29 +508,29 @@ index 1d8a2330..00000000
 -
 -    val defs = Interactive.namedTrees(uriTrees, Include.local, excludeParamsFromSyntheticSymbols)
 -
--    for {
+-    (for {
 -      d <- defs if (!isWorksheetWrapper(d) && !isTopLevelWrapper(d))
 -      info <- symbolInfo(d.tree.symbol, d.pos)
--    } yield info
+-    } yield JEither.forLeft(info)).asJava
 -  }
 -
--  def symbol(params: WorkspaceSymbolParams): List[SymbolInformation] = computeSync {
--    val query = params.query
+-  override def symbol(params: WorkspaceSymbolParams) = computeAsync { cancelToken =>
+-    val query = params.getQuery
 -
--    drivers.values.toList.flatMap { driver =>
+-    Either.forLeft(drivers.values.toList.flatMap { driver =>
 -      implicit def ctx: Context = driver.currentCtx
 -
 -      val trees = driver.sourceTreesContaining(query)
 -      val defs = Interactive.namedTrees(trees, Include.empty, _.name.toString.contains(query))
 -      defs.flatMap(d => symbolInfo(d.tree.symbol, d.namePos))
--    }
+-    }.asJava)
 -  }
 -
--  def implementation(params: TextDocumentPositionParams): List[Location] = computeSync {
--    val uri = new URI(params.textDocument.uri)
+-  override def implementation(params: ImplementationParams) = computeAsync { cancelToken =>
+-    val uri = new URI(params.getTextDocument.getUri)
 -    val driver = driverFor(uri)
 -
--    val pos = sourcePosition(driver, uri, params.position)
+-    val pos = sourcePosition(driver, uri, params.getPosition)
 -
 -    val (definitions, originalSymbols) = {
 -      implicit def ctx: Context = driver.currentCtx
@@ -555,27 +552,41 @@ index 1d8a2330..00000000
 -        val matches = Interactive.namedTrees(trees, Include.local, predicate)(using ctx)
 -        matches.map(tree => location(tree.namePos(using ctx)))
 -      }
--    }.toList
+-    }
 -
--    implementations.flatten
+-    Either.forLeft(implementations.flatten.asJava)
 -  }
 -
--  def signatureHelp(params: TextDocumentPositionParams): SignatureHelp = computeSync {
--    val uri = new URI(params.textDocument.uri)
+-  override def signatureHelp(params: SignatureHelpParams) = computeAsync { canceltoken =>
+-    val uri = new URI(params.getTextDocument.getUri)
 -    val driver = driverFor(uri)
 -
 -    driver.compilationUnits.get(uri) match
 -      case Some(unit) =>
 -        given newCtx: Context = driver.currentCtx.fresh.setCompilationUnit(unit)
--        val pos = sourcePosition(driver, uri, params.position)
+-        val pos = sourcePosition(driver, uri, params.getPosition)
 -        val adjustedSpan = pos.span.withEnd(pos.span.end + 1)
--        val path = Interactive.pathTo(newCtx.compilationUnit.tpdTree, adjustedSpan)
+-        val path = Interactive.pathTo(ctx.compilationUnit.tpdTree, adjustedSpan)
 -        val (paramN, callableN, signatures) = Signatures.signatureHelp(path, adjustedSpan)
 -
--        SignatureHelp(signatures.map(signatureToSignatureInformation), callableN, paramN)
+-        new SignatureHelp(signatures.map(signatureToSignatureInformation).asJava, callableN, paramN)
 -
--      case _ => SignatureHelp(Nil, -1, -1)
+-      case _ => new SignatureHelp()
+-
 -  }
+-
+-  override def getTextDocumentService: TextDocumentService = this
+-  override def getWorkspaceService: WorkspaceService = this
+-
+-  // Unimplemented features. If you implement one of them, you may need to add a
+-  // capability in `initialize`
+-  override def codeAction(params: CodeActionParams) = null
+-  override def codeLens(params: CodeLensParams) = null
+-  override def formatting(params: DocumentFormattingParams) = null
+-  override def rangeFormatting(params: DocumentRangeFormattingParams) = null
+-  override def onTypeFormatting(params: DocumentOnTypeFormattingParams) = null
+-  override def resolveCodeLens(params: CodeLens) = null
+-  override def resolveCompletionItem(params: CompletionItem) = null
 -
 -  /**
 -   * Find the set of projects that have any of `definitions` on their classpath.
@@ -616,24 +627,50 @@ index 1d8a2330..00000000
 -      (remoteDriver, ctx, definitions)
 -    }
 -  }
+-
+-  /**
+-   * Send a `window/showMessageRequest` to the client, asking to choose between `choices`, and
+-   * perform the associated operation.
+-   *
+-   * @param tpe     The type of the request
+-   * @param message The message accompanying the request
+-   * @param choices The choices and their associated operation
+-   * @return A future that will complete with the result of executing the action corresponding to
+-   *         the user's response.
+-   */
+-  private def showMessageRequest[T](tpe: MessageType,
+-                                    message: String,
+-                                    choices: List[(String, () => T)]): CompletableFuture[Option[T]] = {
+-    val options = choices.map((title, _) => new MessageActionItem(title))
+-    val request = new ShowMessageRequestParams(options.asJava)
+-    request.setMessage(message)
+-    request.setType(tpe)
+-
+-    client.showMessageRequest(request).thenApply { (message: MessageActionItem) =>
+-      for {
+-        answer <- Option(message)
+-        (_, action) <- choices.find(_._1 == answer.getTitle)
+-      } yield action()
+-    }
+-  }
 -}
 -
 -object DottyLanguageServer {
 -
--  // Was ".dotty-ide.json" at the project root -- moved inside the build
--  // tool's own `.scalino-build/` dir (alongside `classDirectory`, see
--  // `cli/ScalinoCli.scala`'s handleSetupIde) so a project's .gitignore only
--  // needs one entry for scalino's build output, not a second one for this.
--  final val IDE_CONFIG_FILE = ".scalino-build/scalino-lsp.json"
+-  final val IDE_CONFIG_FILE = ".dotty-ide.json"
 -
--  /** Convert an Lsp.Position to a SourcePosition */
--  def sourcePosition(driver: InteractiveDriver, uri: URI, pos: Position): SourcePosition = {
+-  final val RENAME_OVERRIDDEN_QUESTION = "Do you want to rename the base member, or only this member?"
+-  final val RENAME_OVERRIDDEN= "Rename the base member"
+-  final val RENAME_NO_OVERRIDDEN = "Rename only this member"
+-
+-  /** Convert an lsp4j.Position to a SourcePosition */
+-  def sourcePosition(driver: InteractiveDriver, uri: URI, pos: lsp4j.Position): SourcePosition = {
 -    val actualPosition =
 -      if (isWorksheet(uri)) toWrappedPosition(pos)
 -      else pos
 -    val source = driver.openedFiles(uri)
 -    if (source.exists)
--      source.lineToOffsetOpt(actualPosition.line).map(_ + actualPosition.character) match {
+-      source.lineToOffsetOpt(actualPosition.getLine).map(_ + actualPosition.getCharacter) match {
 -        // `<=` to allow an offset to point to the end of the file
 -        case Some(offset) if offset <= source.content().length =>
 -          val p = Spans.Span(offset)
@@ -644,37 +681,42 @@ index 1d8a2330..00000000
 -    else NoSourcePosition
 -  }
 -
--  /** Convert a SourcePosition to an Lsp.Range */
--  def range(p: SourcePosition): Option[Lsp.Range] =
+-  /** Convert a SourcePosition to an lsp4j.Range */
+-  def range(p: SourcePosition): Option[lsp4j.Range] =
 -    if (p.exists) {
 -      val mappedPosition = positionMapperFor(p.source).map(_(p)).getOrElse(p)
--      Some(Lsp.Range(
--        Position(mappedPosition.startLine, mappedPosition.startColumn),
--        Position(mappedPosition.endLine, mappedPosition.endColumn)
+-      Some(new lsp4j.Range(
+-        new lsp4j.Position(mappedPosition.startLine, mappedPosition.startColumn),
+-        new lsp4j.Position(mappedPosition.endLine, mappedPosition.endColumn)
 -      ))
 -    } else
 -      None
 -
--  /** Convert a SourcePosition to an Lsp.Location */
--  def location(p: SourcePosition): Option[Location] =
+-  /** Convert a SourcePosition to an lsp4.Location */
+-  def location(p: SourcePosition): Option[lsp4j.Location] =
 -    for {
 -      uri <- toUriOption(p.source)
 -      r <- range(p)
--    } yield Location(uri.toString, r)
+-    } yield new lsp4j.Location(uri.toString, r)
 -
 -  /**
--   * Convert a Diagnostic to an Lsp.Diagnostic.
+-   * Convert a Diagnostic to an lsp4j.Diagnostic.
 -   */
--  def toLspDiagnostic(dia: Diagnostic)(implicit ctx: Context): Option[Lsp.Diagnostic] =
+-  def diagnostic(dia: Diagnostic)(implicit ctx: Context): Option[lsp4j.Diagnostic] =
 -    if (!dia.pos.exists)
 -      None // diagnostics without positions are not supported: https://github.com/Microsoft/language-server-protocol/issues/249
 -    else {
--      def severity(level: Int): Int = {
+-      def severity(level: Int): lsp4j.DiagnosticSeverity = {
 -        import interfaces.{Diagnostic => D}
+-        import lsp4j.{DiagnosticSeverity => DS}
+-
 -        level match {
--          case D.INFO => 3      // Information
--          case D.WARNING => 2   // Warning
--          case D.ERROR => 1     // Error
+-          case D.INFO =>
+-            DS.Information
+-          case D.WARNING =>
+-            DS.Warning
+-          case D.ERROR =>
+-            DS.Error
 -        }
 -      }
 -
@@ -682,7 +724,8 @@ index 1d8a2330..00000000
 -      if (displayMessage(message, dia.pos.source)) {
 -        val code = message.errorId.errorNumber.toString
 -        range(dia.pos).map(r =>
--            Lsp.Diagnostic(r, dia.message, severity(dia.level), /*source =*/ "", code))
+-            new lsp4j.Diagnostic(
+-              r, dia.message, severity(dia.level), /*source =*/ "", code))
 -      } else {
 -        None
 -      }
@@ -753,8 +796,8 @@ index 1d8a2330..00000000
 -   * @param position The position as seen by VSCode (before wrapping)
 -   * @return The position as seen by the compiler (after wrapping)
 -   */
--  private def toWrappedPosition(position: Position): Position = {
--    Position(position.line + 1, position.character)
+-  private def toWrappedPosition(position: lsp4j.Position): lsp4j.Position = {
+-    new lsp4j.Position(position.getLine + 1, position.getCharacter)
 -  }
 -
 -  /**
@@ -793,43 +836,56 @@ index 1d8a2330..00000000
 -    symbol.isPackageObject
 -  }
 -
--  /** Create an Lsp.CompletionItem from a completion result */
--  def completionItem(completion: Completion)(implicit ctx: Context): CompletionItem = {
--    def completionItemKind(sym: Symbol)(implicit ctx: Context): Int = {
--      // Numeric values per the LSP spec's CompletionItemKind enum.
+-  /** Create an lsp4j.CompletionItem from a completion result */
+-  def completionItem(completion: Completion)(implicit ctx: Context): lsp4j.CompletionItem = {
+-    def completionItemKind(sym: Symbol)(implicit ctx: Context): lsp4j.CompletionItemKind = {
+-      import lsp4j.{CompletionItemKind => CIK}
+-
 -      if sym.is(Package) || sym.is(Module) then
--        9 // Module -- no CompletionItemKind.Package (https://github.com/Microsoft/language-server-protocol/issues/155)
+-        CIK.Module // No CompletionItemKind.Package (https://github.com/Microsoft/language-server-protocol/issues/155)
 -      else if sym.isConstructor then
--        4 // Constructor
+-        CIK.Constructor
 -      else if sym.isClass then
--        7 // Class
+-        CIK.Class
 -      else if sym.is(Mutable) then
--        6 // Variable
+-        CIK.Variable
 -      else if sym.is(Method) then
--        2 // Method
+-        CIK.Method
 -      else
--        5 // Field
+-        CIK.Field
 -    }
+-
+-    val item = new lsp4j.CompletionItem(completion.label)
+-    item.setDetail(completion.description)
 -
 -    val documentation = for {
 -      sym <- completion.symbols
 -      doc <- ParsedComment.docOf(sym)
 -    } yield doc
 -
--    val kind = completion.symbols.headOption.map(completionItemKind)
--    val deprecated = completion.symbols.forall(_.hasAnnotation(defn.DeprecatedAnnot))
+-    if (documentation.nonEmpty) {
+-      item.setDocumentation(hoverContent(None, documentation))
+-    }
 -
--    CompletionItem(
--      label = completion.label,
--      kind = kind,
--      detail = Some(completion.description),
--      documentation = if (documentation.nonEmpty) hoverContent(None, documentation) else None,
--      deprecated = deprecated)
+-    item.setDeprecated(completion.symbols.forall(_.hasAnnotation(defn.DeprecatedAnnot)))
+-    completion.symbols.headOption.foreach(s => item.setKind(completionItemKind(s)))
+-    item
+-  }
+-
+-  def markupContent(content: String): lsp4j.MarkupContent = {
+-    if content.isEmpty then
+-      null
+-    else {
+-      val markup = new lsp4j.MarkupContent
+-      markup.setKind("markdown")
+-      markup.setValue(content.trim)
+-      markup
+-    }
 -  }
 -
 -  private def hoverContent(typeInfo: Option[String],
 -                           comments: List[ParsedComment]
--                          )(implicit ctx: Context): Option[MarkupContent] = {
+-                          )(implicit ctx: Context): lsp4j.MarkupContent = {
 -    val buf = new StringBuilder
 -    typeInfo.foreach { info =>
 -      buf.append(s"""```scala
@@ -841,53 +897,52 @@ index 1d8a2330..00000000
 -      buf.append(comment.renderAsMarkdown)
 -    }
 -
--    val content = buf.toString
--    if content.isEmpty then None
--    else Some(MarkupContent("markdown", content.trim))
+-    markupContent(buf.toString)
 -  }
 -
--  /** Create an Lsp.SymbolInformation from a Symbol and a SourcePosition */
--  def symbolInfo(sym: Symbol, pos: SourcePosition)(implicit ctx: Context): Option[SymbolInformation] = {
--    def symbolKind(sym: Symbol)(implicit ctx: Context): Int = {
--      // Numeric values per the LSP spec's SymbolKind enum.
+-  /** Create an lsp4j.SymbolInfo from a Symbol and a SourcePosition */
+-  def symbolInfo(sym: Symbol, pos: SourcePosition)(implicit ctx: Context): Option[lsp4j.SymbolInformation] = {
+-    def symbolKind(sym: Symbol)(implicit ctx: Context): lsp4j.SymbolKind = {
+-      import lsp4j.{SymbolKind => SK}
+-
 -      if (sym.is(Package))
--        4 // Package
+-        SK.Package
 -      else if (sym.isConstructor)
--        9 // Constructor
+-        SK.Constructor
 -      else if (sym.is(Module))
--        2 // Module
+-        SK.Module
 -      else if (sym.isAllOf(EnumCase) || sym.isAllOf(EnumValue))
--        22 // EnumMember
+-        SK.EnumMember
 -      else if (sym.is(Enum))
--        10 // Enum
+-        SK.Enum
 -      else if (sym.is(Trait))
--        11 // Interface
+-        SK.Interface
 -      else if (sym.isClass)
--        5 // Class
+-        SK.Class
 -      else if (sym.is(Mutable))
--        13 // Variable
+-        SK.Variable
 -      else if (sym.is(Method))
--        6 // Method
+-        SK.Method
 -      else if (sym.is(TypeParam) || sym.isAbstractOrAliasType)
--        26 // TypeParameter
+-        SK.TypeParameter
 -      else
--        8 // Field
+-        SK.Field
 -    }
--    def containerName(sym: Symbol): Option[String] = {
+-    def containerName(sym: Symbol): String = {
 -      val owner = if (sym.owner.exists && sym.owner.isPackageObject) sym.owner.owner else sym.owner
 -      if (owner.exists && !owner.isEmptyPackage) {
--          Some(owner.name.stripModuleClassSuffix.show)
+-          owner.name.stripModuleClassSuffix.show
 -      } else
--        None
+-        null
 -    }
 -
 -    val name = sym.name.stripModuleClassSuffix.show
 -
--    location(pos).map(l => SymbolInformation(name, symbolKind(sym), l, containerName(sym)))
+-    location(pos).map(l => new lsp4j.SymbolInformation(name, symbolKind(sym), l, containerName(sym)))
 -  }
 -
 -  /** Convert `signature` to a `SignatureInformation` */
--  def signatureToSignatureInformation(signature: Signatures.Signature): SignatureInformation = {
+-  def signatureToSignatureInformation(signature: Signatures.Signature): lsp4j.SignatureInformation = {
 -    val paramInfoss =
 -      (signature.paramss.flatten).map(paramToParameterInformation)
 -    val paramLists =
@@ -907,59 +962,294 @@ index 1d8a2330..00000000
 -        }.mkString
 -    val returnTypeLabel = signature.returnType.map(t => s": $t").getOrElse("")
 -    val label = s"${signature.name}$paramLists$returnTypeLabel"
--    val documentation = signature.doc.map(d => MarkupContent("markdown", d.trim))
--    SignatureInformation(label, documentation, paramInfoss)
+-    val documentation = signature.doc.map(DottyLanguageServer.markupContent)
+-    val sig = new lsp4j.SignatureInformation(label)
+-    sig.setParameters(paramInfoss.asJava)
+-    documentation.foreach(sig.setDocumentation(_))
+-    sig
 -  }
 -
 -  /** Convert `param` to `ParameterInformation` */
--  private def paramToParameterInformation(param: Signatures.Param): ParameterInformation = {
--    val documentation = param.doc.map(d => MarkupContent("markdown", d.trim))
--    ParameterInformation(param.show, documentation)
+-  private def paramToParameterInformation(param: Signatures.Param): lsp4j.ParameterInformation = {
+-    val documentation = param.doc.map(DottyLanguageServer.markupContent)
+-    val info = new lsp4j.ParameterInformation(param.show)
+-    documentation.foreach(info.setDocumentation(_))
+-    info
 -  }
 -}
 diff --git a/language-server/src/dotty/tools/languageserver/Main.scala b/language-server/src/dotty/tools/languageserver/Main.scala
-index 06535fc0..d2cddb3d 100644
+index 7f269eec..d2cddb3d 100644
 --- a/language-server/src/dotty/tools/languageserver/Main.scala
 +++ b/language-server/src/dotty/tools/languageserver/Main.scala
-@@ -28,7 +28,8 @@ object Log {
+@@ -1,28 +1,58 @@
+ package dotty.tools
+ package languageserver
  
- /** Run the Dotty Language Server: owns the actual JSON-RPC/LSP transport
-  *  (stdio framing, request/notification dispatch, response encoding) and
-- *  calls into the plain synchronous methods on `DottyLanguageServer`.
+-import java.util.function.Consumer
++import java.io.{FileWriter, InputStream, OutputStream, PrintWriter}
++import java.time.Instant
++import java.util.concurrent.LinkedBlockingQueue
+ 
+-import java.io.{ File => JFile, InputStream, OutputStream, PrintWriter }
+-import java.net._
+-import java.nio.channels._
++import com.github.plokhotnyuk.jsoniter_scala.core._
++import Lsp._
++import Lsp.given
+ 
+-import org.eclipse.lsp4j._
+-import org.eclipse.lsp4j.services._
+-import org.eclipse.lsp4j.launch._
+-import org.eclipse.lsp4j.jsonrpc.Launcher
++/** Appends a timestamped line per dispatched RPC method to `.scalino-lsp.log`
++ *  in the server's working directory (the editor's project root -- see
++ *  `Main.runStdio`) -- a real log file the server writes itself, rather
++ *  than relying on the editor to capture/display stderr (Zed, e.g., only
++ *  surfaces a truncated snapshot of stderr on connection failure, useless
++ *  for seeing what happened *before* things went wrong). Best-effort: if the
++ *  file can't be opened (read-only cwd, etc.) logging is silently a no-op
++ *  rather than a reason to fail startup. */
++object Log {
++  private val writer =
++    try Some(new PrintWriter(new FileWriter(".scalino-lsp.log", /* append = */ true), /* autoFlush = */ true))
++    catch { case _: Throwable => None }
+ 
+-/** Run the Dotty Language Server.
++  def apply(msg: String): Unit =
++    writer.foreach(w => w.println(s"[${Instant.now}] $msg"))
++}
++
++/** Run the Dotty Language Server: owns the actual JSON-RPC/LSP transport
++ *  (stdio framing, request/notification dispatch, response encoding) and
 + *  calls into the plain synchronous methods on `PcLanguageServer` (a thin
 + *  layer over `scala3-presentation-compiler`, see its own doc comment).
-  *
-  *  No lsp4j: see `Lsp.scala`'s doc comment and docs/findings.md "JVM-free
-  *  language server (LSP)" for why. The reader thread only frames messages
-@@ -84,14 +85,13 @@ object Main {
-     def sendShowMessage(message: String): Unit =
-       sendNotification("window/showMessage", writeToArray(ShowMessageParams(1, message))(using showMessageParamsCodec))
++ *
++ *  No lsp4j: see `Lsp.scala`'s doc comment and docs/findings.md "JVM-free
++ *  language server (LSP)" for why. The reader thread only frames messages
++ *  and decodes the (method, id, raw params) envelope (`Lsp.IncomingEnvelope`)
++ *  before handing off to a single worker thread that does the real
++ *  (potentially slow) compiler work -- so a slow request never blocks the
++ *  reader from noticing e.g. a new `didChange` or `exit`.
+  */
+ object Main {
++
++  private val InternalErrorCode = -32603
++
+   def main(args: Array[String]): Unit = {
+     args.toList match {
+       case List("-stdio") =>
+         val serverIn = System.in
+         val serverOut = System.out
++        // Redirect System.out/Console.out to stderr so any stray println
++        // from deep in the compiler can't corrupt the LSP wire stream,
++        // which is written directly to `serverOut` below instead.
+         System.setOut(System.err)
+         scala.Console.withOut(scala.Console.err) {
+-          startServer(serverIn, serverOut)
++          runStdio(serverIn, serverOut)
+         }
+       case _ =>
+         Console.err.println("Invalid arguments: expected \"-stdio\" or \"-client_command ...\"")
+@@ -30,22 +60,175 @@ object Main {
+     }
+   }
  
--    val server = new DottyLanguageServer(
--      publishDiagnostics = (uri, diags) =>
--        sendNotification("textDocument/publishDiagnostics", writeToArray(PublishDiagnosticsParams(uri, diags))))
+-  def startServer(in: InputStream, out: OutputStream) = {
+-    val server = new DottyLanguageServer
+-
++  def runStdio(in: InputStream, out: OutputStream): Unit = {
+     println("Starting server")
+-    val launcher =
+-      new Launcher.Builder[DottyClient]()
+-        .setLocalService(server)
+-        .setRemoteInterface(classOf[DottyClient])
+-        .setInput(in)
+-        .setOutput(out)
+-        // For debugging JSON messages:
+-        //.traceMessages(new java.io.PrintWriter(System.err, true))
+-        .create();
+-
+-    val client = launcher.getRemoteProxy()
+-    server.connect(client)
+-    launcher.startListening()
++    Log("Starting server")
++
++    val writeLock = new Object
++    def writeFramed(bytes: Array[Byte]): Unit = writeLock.synchronized {
++      val header = s"Content-Length: ${bytes.length}\r\n\r\n".getBytes("UTF-8")
++      out.write(header)
++      out.write(bytes)
++      out.flush()
++    }
++
++    def sendResult(idRaw: Array[Byte], resultBytes: Array[Byte]): Unit =
++      writeFramed(writeToArray(ResponseEnvelope(idRaw, resultBytes)))
++    def sendError(idRaw: Array[Byte], message: String): Unit =
++      writeFramed(writeToArray(ErrorEnvelope(idRaw, InternalErrorCode, message)))
++    def sendNotification(method: String, paramsBytes: Array[Byte]): Unit =
++      writeFramed(writeToArray(NotificationEnvelope(method, paramsBytes)))
++    // Error type = 1, see ShowMessageParams's doc comment (Lsp.scala) --
++    // used below so a failed *notification* (didOpen/didChange/didClose,
++    // none of which have a response channel to carry an error back on) is
++    // still visible in the editor, not just logged to .scalino-lsp.log.
++    def sendShowMessage(message: String): Unit =
++      sendNotification("window/showMessage", writeToArray(ShowMessageParams(1, message))(using showMessageParamsCodec))
++
 +    val server = new PcLanguageServer((uri, diags) =>
 +      sendNotification("textDocument/publishDiagnostics", writeToArray(PublishDiagnosticsParams(uri, diags))))
- 
-     // A single worker thread does all the (potentially slow) compiler work,
-     // strictly in the order requests/notifications were received -- matches
--    // the previous implementation's own full serialization (DottyLanguageServer
--    // never supported concurrent compiler access), but keeps the reader loop
++
++    // A single worker thread does all the (potentially slow) compiler work,
++    // strictly in the order requests/notifications were received -- matches
 +    // the previous DottyLanguageServer's own full serialization (never
 +    // supported concurrent compiler access either), but keeps the reader loop
-     // itself always free to keep reading (e.g. so `exit`/`$/cancelRequest`
-     // aren't stuck behind a slow `hover`).
-     val queue = new LinkedBlockingQueue[Runnable]()
++    // itself always free to keep reading (e.g. so `exit`/`$/cancelRequest`
++    // aren't stuck behind a slow `hover`).
++    val queue = new LinkedBlockingQueue[Runnable]()
++    val worker = new Thread(() => {
++      while (true) {
++        val task = queue.take()
++        task.run()
++      }
++    })
++    worker.setName("scalino-lsp-worker")
++    worker.setDaemon(false) // keep the JVM alive for as long as there's real work queued or pending
++    worker.start()
++
++    def handle(env: IncomingEnvelope): Unit = {
++      val isRequest = env.idRaw != null
++      try {
++        Log(s"-> ${env.method}")
++        env.method match {
++          case "initialize" =>
++            val params = readFromArray(env.paramsRaw)(using initializeParamsCodec)
++            val result = server.initialize(params.rootUri)
++            sendResult(env.idRaw, writeToArray(result))
++          case "initialized" => // no-op notification
++          case "shutdown" =>
++            sendResult(env.idRaw, "null".getBytes("UTF-8"))
++          case "textDocument/didOpen" =>
++            server.didOpen(readFromArray(env.paramsRaw)(using didOpenTextDocumentParamsCodec))
++          case "textDocument/didChange" =>
++            server.didChange(readFromArray(env.paramsRaw)(using didChangeTextDocumentParamsCodec))
++          case "textDocument/didClose" =>
++            server.didClose(readFromArray(env.paramsRaw)(using didCloseTextDocumentParamsCodec))
++          case "textDocument/didSave" | "workspace/didChangeConfiguration" | "workspace/didChangeWatchedFiles" =>
++            () // no-op notifications, matching the previous lsp4j-based implementation
++          case "textDocument/completion" =>
++            val params = readFromArray(env.paramsRaw)(using textDocumentPositionParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.completion(params)))
++          case "textDocument/definition" =>
++            val params = readFromArray(env.paramsRaw)(using textDocumentPositionParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.definition(params))(using locationListCodec))
++          case "textDocument/references" =>
++            val params = readFromArray(env.paramsRaw)(using referenceParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.references(params))(using locationListCodec))
++          case "textDocument/rename" =>
++            val params = readFromArray(env.paramsRaw)(using renameParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.rename(params)))
++          case "textDocument/documentHighlight" =>
++            val params = readFromArray(env.paramsRaw)(using textDocumentPositionParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.documentHighlight(params))(using documentHighlightListCodec))
++          case "textDocument/hover" =>
++            val params = readFromArray(env.paramsRaw)(using textDocumentPositionParamsCodec)
++            server.hover(params) match {
++              case Some(hover) => sendResult(env.idRaw, writeToArray(hover))
++              case None => sendResult(env.idRaw, "null".getBytes("UTF-8"))
++            }
++          case "textDocument/documentSymbol" =>
++            val params = readFromArray(env.paramsRaw)(using documentSymbolParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.documentSymbol(params))(using symbolInformationListCodec))
++          case "workspace/symbol" =>
++            val params = readFromArray(env.paramsRaw)(using workspaceSymbolParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.symbol(params))(using symbolInformationListCodec))
++          case "textDocument/implementation" =>
++            val params = readFromArray(env.paramsRaw)(using textDocumentPositionParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.implementation(params))(using locationListCodec))
++          case "textDocument/signatureHelp" =>
++            val params = readFromArray(env.paramsRaw)(using textDocumentPositionParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.signatureHelp(params)))
++          case "$/cancelRequest" => () // no cancellation support -- see docs/findings.md
++          case other =>
++            Log(s"<- $other UNSUPPORTED")
++            if (isRequest) sendError(env.idRaw, s"Unsupported method: $other")
++        }
++        if (env.method != "shutdown") Log(s"<- ${env.method} ok")
++      } catch {
++        case t: Throwable =>
++          Log(s"<- ${env.method} FAILED: ${t.getClass.getName}: ${t.getMessage}")
++          t.printStackTrace()
++          if (isRequest) sendError(env.idRaw, s"${t.getClass.getName}: ${t.getMessage}")
++          else sendShowMessage(s"scalino-lsp: ${env.method} failed: ${t.getClass.getName}: ${t.getMessage}")
++      }
++    }
++
++    // -- Raw Content-Length-framed message reading ---------------------------
++    def readHeaderLine(): String = {
++      val sb = new StringBuilder
++      var c = in.read()
++      while (c != -1 && c != '\n') {
++        if (c != '\r') sb.append(c.toChar)
++        c = in.read()
++      }
++      if (c == -1 && sb.isEmpty) null else sb.toString
++    }
++    def readFramedBody(): Array[Byte] = {
++      var contentLength = -1
++      var line = readHeaderLine()
++      while (line != null && line.nonEmpty) {
++        val idx = line.indexOf(':')
++        if (idx >= 0 && line.substring(0, idx).trim.equalsIgnoreCase("Content-Length"))
++          contentLength = line.substring(idx + 1).trim.toInt
++        line = readHeaderLine()
++      }
++      if (line == null || contentLength < 0) null
++      else {
++        val buf = new Array[Byte](contentLength)
++        var off = 0
++        while (off < contentLength) {
++          val n = in.read(buf, off, contentLength - off)
++          if (n < 0) throw new java.io.EOFException("stdin closed mid-message")
++          off += n
++        }
++        buf
++      }
++    }
++
++    var running = true
++    while (running) {
++      val body =
++        try readFramedBody()
++        catch { case _: java.io.EOFException => null }
++      if (body == null) {
++        running = false
++      } else {
++        val env =
++          try readFromArray(body)(using incomingEnvelopeCodec)
++          catch {
++            case t: Throwable =>
++              Log(s"<- (unparseable message) FAILED: ${t.getClass.getName}: ${t.getMessage}")
++              null
++          }
++        if (env != null) {
++          if (env.method == "exit") {
++            Log("-> exit")
++            System.exit(0)
++          } else {
++            queue.put(() => handle(env))
++          }
++        }
++      }
++    }
+   }
+ }
 diff --git a/language-server/src/dotty/tools/languageserver/Memory.scala b/language-server/src/dotty/tools/languageserver/Memory.scala
 deleted file mode 100644
-index 78d53737..00000000
+index 5de6ddbc..00000000
 --- a/language-server/src/dotty/tools/languageserver/Memory.scala
 +++ /dev/null
-@@ -1,58 +0,0 @@
+@@ -1,47 +0,0 @@
 -package dotty.tools
 -package languageserver
--
--import java.lang.management.ManagementFactory
 -
 -object Memory {
 -
@@ -979,38 +1269,29 @@ index 78d53737..00000000
 -  private final val stressTest = false
 -  private var stressTestCounter = 0
 -
--  // `Runtime#{maxMemory,totalMemory,freeMemory}` are real JDK-only methods --
--  // absent from Scala Native's own same-named `java.lang.Runtime` stub, which
--  // only declares `gc()`. `java.lang.management.ManagementFactory`/
--  // `MemoryMXBean`/`MemoryUsage`, by contrast, are standard JDK API that Scala
--  // Native's javalib also implements for real (backed by `GC.get{Used,Max}HeapSize`),
--  // so using them here is a single, unconditional, correct-on-every-backend fix
--  // rather than a platform-specific workaround.
--  private def heapUsage() = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage()
--
 -  /** Is memory critically low? */
 -  def isCritical(): Boolean = {
 -    if (stressTest) {
 -      stressTestCounter += 1
 -      if (stressTestCounter % 10 == 0) return true
 -    }
--    val bean = ManagementFactory.getMemoryMXBean()
--    def usage = bean.getHeapMemoryUsage()
--    def used = usage.getUsed
--    def maximal = usage.getMax
--    def free = usage.getCommitted - used
+-    val runtime = Runtime.getRuntime
+-    def total = runtime.totalMemory
+-    def maximal = runtime.maxMemory
+-    def free = runtime.freeMemory
+-    def used = total - free
 -    def usedIsCloseToMax =
--      if maximal < 0 then free.toDouble / used < FreeThreshold
+-      if maximal == Long.MaxValue then free.toDouble / used < FreeThreshold
 -      else used.toDouble / maximal > UsedThreshold
--    usedIsCloseToMax && { bean.gc(); usedIsCloseToMax }
+-    usedIsCloseToMax && { runtime.gc(); usedIsCloseToMax }
 -  }
 -
 -  def stats(): String = {
 -    val M = 2 << 20
--    val usage = heapUsage()
--    def total = usage.getCommitted / M
--    def maximal = usage.getMax / M
--    def free = (usage.getCommitted - usage.getUsed) / M
+-    val runtime = Runtime.getRuntime
+-    def total = runtime.totalMemory / M
+-    def maximal = runtime.maxMemory / M
+-    def free = runtime.freeMemory / M
 -    s"total used memory: $total MB, free: $free MB, maximal available = $maximal MB"
 -  }
 -}

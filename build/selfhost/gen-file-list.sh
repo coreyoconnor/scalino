@@ -37,10 +37,17 @@ find "$ROOT/vendor/scala3/compiler/src" -name "*.scala" \
   -not -name "ThunkHolder.scala" \
   -not -name "SJSPlatform.scala"
 
-# DottyPrimitives.scala: the one backend/jvm file that IS needed (nscplugin's
-# own NirPrimitives.scala imports it) -- self-contained, no real ASM
-# dependency, safe to include on its own without the rest of backend/jvm.
-echo "$ROOT/vendor/scala3/compiler/src/dotty/tools/backend/jvm/DottyPrimitives.scala"
+# `backend/jvm/DottyPrimitives.scala` (the one backend/jvm file this build
+# ever needed, since nscplugin's own NirPrimitives.scala imports it) was
+# renamed+moved to `backend/ScalaPrimitives.scala` as of Scala 3.9 -- already
+# picked up under its new name by the plain `find` above (no longer under
+# backend/jvm at all). nscplugin's own vendored source (unpatched -- its
+# import of the *old* `backend.jvm.DottyPrimitives` name still needs to
+# resolve, and untouched because scala-native's own internal sbt build
+# compiles the same file against its own separately-pinned, pre-3.9 dotty)
+# needs a same-named compat shim under the old package+name, forwarding to
+# the real (renamed) class -- see build/selfhost/DottyPrimitivesCompat.scala.
+echo "$ROOT/build/selfhost/DottyPrimitivesCompat.scala"
 
 # The Blocker-A-era generated MiniPhase override table (build/02b-gen-megaphase-overrides.sh).
 echo "$ROOT/.build-work/generated/MiniPhaseOverrides.scala"

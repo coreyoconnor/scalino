@@ -55,6 +55,19 @@ public class GenMiniPhaseOverrides {
 
   static final String MINI_PHASE = "dotty.tools.dotc.transform.MegaPhase$MiniPhase";
 
+  static void collectClassNamesFromDir(File root, File dir, List<String> out) {
+    File[] children = dir.listFiles();
+    if (children == null) return;
+    for (File c : children) {
+      if (c.isDirectory()) {
+        collectClassNamesFromDir(root, c, out);
+      } else if (c.getName().endsWith(".class") && !c.getName().equals("module-info.class")) {
+        String rel = root.toURI().relativize(c.toURI()).getPath();
+        out.add(rel.substring(0, rel.length() - ".class".length()).replace('/', '.'));
+      }
+    }
+  }
+
   public static void main(String[] args) throws Exception {
     if (args.length < 2) {
       System.err.println("usage: GenMiniPhaseOverrides <classpath>... <out.scala>");
@@ -68,7 +81,17 @@ public class GenMiniPhaseOverrides {
       for (String p : args[i].split(File.pathSeparator)) {
         if (p.isEmpty()) continue;
         File f = new File(p);
-        if (!f.exists() || !p.endsWith(".jar")) continue;
+        if (!f.exists()) continue;
+        if (f.isDirectory()) {
+          // A build-time-only compiled-classes directory (e.g. this
+          // project's own patched-phase discovery classes, which never
+          // become a real .jar) -- walk it for .class files the same way
+          // the jar branch below walks jar entries.
+          urls.add(f.toURI().toURL());
+          collectClassNamesFromDir(f, f, classNames);
+          continue;
+        }
+        if (!p.endsWith(".jar")) continue;
         urls.add(f.toURI().toURL());
         try (JarFile jar = new JarFile(f)) {
           Enumeration<JarEntry> entries = jar.entries();
