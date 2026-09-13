@@ -41,6 +41,7 @@ mkdir -p "$PATCHED_DIR"
   "$VENDOR/tools/src/main/scala/scala/scalanative/build/LLVM.scala" \
   "$VENDOR/tools/src/main/scala/scala/scalanative/build/NativeLib.scala" \
   "$VENDOR/tools/src/main/scala/scala/scalanative/build/ScalaNative.scala" \
+  "$VENDOR/tools/src/main/scala/scala/scalanative/build/IO.scala" \
   "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/IncrementalCodeGenContext.scala" \
   "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/llvm/CodeGen.scala" \
   "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/Interflow.scala"

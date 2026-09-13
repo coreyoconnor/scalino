@@ -15,7 +15,26 @@ source ./00-env.sh
 [[ -f "$WORK/tools-patched.cp" ]] || { echo "run 04a-patch-tools.sh first" >&2; exit 1; }
 
 DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools.cp")$CP_SEP$(to_native_path "$WORK/driver-classes")"
-NATIVE_DRIVER_CP="$(to_native_path "$WORK/driver-classes")$CP_SEP$(cat "$WORK/tools-patched.cp")"
+
+# Substitute the published javalib_native0.5_3 jar for the locally-built one
+# with patches/scala-native-0009 (ZipFileSystemProvider) actually applied --
+# see build/01b-build-patched-javalib.sh. This classpath becomes the actual
+# runtime javalib baked into the linked scalino-linkdriver binary itself (not
+# just this build step's own tooling), which is what determines whether the
+# jar classpath entries LinkDriver hands to `Build` at RUNTIME (any real
+# `scalino build`, not just this bootstrap) can be read via NIO's "jar:"
+# FileSystemProvider instead of needing extractJarIfNeeded's workaround.
+TOOLS_PATCHED_JAVALIB_CP="$WORK/tools-patched-javalib.cp"
+LOCAL_JAVALIB_JAR="$HOME/.ivy2/local/org.scala-native/javalib_native0.5_3/${SCALA_NATIVE_VERSION}-SNAPSHOT/jars/javalib_native0.5_3.jar"
+if [[ -f "$LOCAL_JAVALIB_JAR" ]]; then
+  { tr "$CP_SEP" '\n' < "$WORK/tools-patched.cp" | grep -v '/javalib_native0\.5_3-'; echo "$LOCAL_JAVALIB_JAR"; } | paste -sd"$CP_SEP" - > "$TOOLS_PATCHED_JAVALIB_CP"
+  echo "  using locally-built, patched javalib jar: $LOCAL_JAVALIB_JAR"
+else
+  cp "$WORK/tools-patched.cp" "$TOOLS_PATCHED_JAVALIB_CP"
+  echo "  WARNING: locally-built javalib jar not found ($LOCAL_JAVALIB_JAR) -- run build/01b-build-patched-javalib.sh first, or patches/scala-native-0009 (ZipFileSystemProvider) will NOT take effect and scalino-linkdriver will fall back to needing jar-extraction workarounds. See docs/findings.md."
+fi
+
+NATIVE_DRIVER_CP="$(to_native_path "$WORK/driver-classes")$CP_SEP$(cat "$TOOLS_PATCHED_JAVALIB_CP")"
 
 NSCPLUGIN_JAR="$(cat "$WORK/nscplugin.jar.txt")"
 
