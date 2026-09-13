@@ -981,7 +981,7 @@ diff --git a/language-server/src/dotty/tools/languageserver/Main.scala b/languag
 index 7f269eec..d2cddb3d 100644
 --- a/language-server/src/dotty/tools/languageserver/Main.scala
 +++ b/language-server/src/dotty/tools/languageserver/Main.scala
-@@ -1,28 +1,58 @@
+@@ -1,28 +1,60 @@
  package dotty.tools
  package languageserver
  
@@ -1052,7 +1052,7 @@ index 7f269eec..d2cddb3d 100644
          }
        case _ =>
          Console.err.println("Invalid arguments: expected \"-stdio\" or \"-client_command ...\"")
-@@ -30,22 +60,175 @@ object Main {
+@@ -29,22 +61,175 @@ object Main {
      }
    }
  
