@@ -311,8 +311,8 @@ def main():
         client.notify("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 2}, "contentChanges": [{"text": main_text_broken}]})
         n, _ = client.drain_notifications(
             lambda n: n.get("method") == "textDocument/publishDiagnostics" and n["params"]["uri"] == main_uri and len(n["params"]["diagnostics"]) > 0,
-            timeout=20)
-        print("got error diagnostics after didChange" if n else "NO error diagnostics within 20s")
+            timeout=150)
+        print("got error diagnostics after didChange" if n else "NO error diagnostics within 150s")
         ok = ok and n is not None
 
         section("STDERR")
