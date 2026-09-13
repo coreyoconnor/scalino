@@ -51,7 +51,19 @@ trap restore EXIT
 # match expected version") even though we're only vendoring their source, not
 # cutting a scala-native release ourselves. Unset for this subprocess only,
 # falling their version logic through to the ordinary CI-snapshot branch.
-env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME -u GITHUB_REF sbt javalib3/publishLocal
+#
+# Also unset CI itself: that same ScalaNativeBuildInfo.scala has a separate
+# branch for `envOrNone("CI").isDefined` that stamps the published version as
+# "$baseVersion-<commitDate>-<gitHash>-SNAPSHOT" instead of the plain
+# "$baseVersion-SNAPSHOT" our build scripts (03/04/08) hardcode via
+# $SCALA_NATIVE_VERSION-SNAPSHOT when locating this jar. On a real CI runner
+# (GitHub Actions sets CI=true) that mismatch made every LOCAL_JAVALIB_JAR
+# check silently miss, so patches/scala-native-0009 (ZipFileSystemProvider)
+# never made it into scalino-linkdriver's own build there -- fine as long as
+# the old jar-extraction workaround covered for it, fatal once that workaround
+# was removed in favor of the patch actually taking effect (see release
+# v0.0.3's CI failure). Works locally already since CI is normally unset.
+env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME -u GITHUB_REF -u CI sbt javalib3/publishLocal
 cd - > /dev/null
 
 echo "OK: patched javalib published to ~/.ivy2/local/org.scala-native/javalib_native0.5_3/${SCALA_NATIVE_VERSION}-SNAPSHOT/"
