@@ -49,7 +49,7 @@ esac
 # in that style, embedded directly (not via a coursier-written *.cp file --
 # those are already native-Windows-style) into a classpath string passed to
 # a real native Windows .exe, silently fails to resolve. Confirmed via CI:
-# 04-build-scalino-linkdriver.sh's native-image invocation couldn't find
+# 04-build-scalino-linkdriver.sh's LinkDriver invocation couldn't find
 # "LinkDriver" at all despite it compiling cleanly one step earlier -- the
 # compile step only ever WROTE to that same raw path (via `-d`), never had
 # to actually read a classpath entry back from it, so it never surfaced
@@ -91,7 +91,7 @@ to_native_path_list() {
 
 # Confirmed via Windows CI: scala-native's own Validator rejected this
 # runner's real, working clang/clang++ with "does not exist" -- same root
-# cause resolve_tool above already exists for GraalVM's tools, but a
+# cause resolve_tool above already exists for the JDK's own tools, but a
 # `[[ -e "$CLANG" ]] || CLANG="$CLANG.exe"` fallback (checking the bare
 # `command -v clang` result first) did NOT fix it, confirmed via a second
 # CI run with that exact fix in place -- whatever git-bash/MSYS resolves

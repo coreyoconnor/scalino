@@ -976,7 +976,7 @@ new file mode 100644
 index 00000000..93654d13
 --- /dev/null
 +++ b/language-server/src/dotty/tools/languageserver/Lsp.scala
-@@ -0,0 +1,930 @@
+@@ -0,0 +1,931 @@
 +package dotty.tools
 +package languageserver
 +
@@ -993,9 +993,10 @@ index 00000000..93654d13
 + *  Deliberately minimal: each params type only has the fields
 + *  `DottyLanguageServer` actually reads; unknown JSON object keys are
 + *  always skipped (see `skipRestOfObject`), so a real editor's much richer
-+ *  `initialize` capabilities (the payload that silently broke Gson under
-+ *  native-image, see docs/findings.md) never gets modeled or parsed at all
-+ *  -- there is no reflection path left for it to break.
++ *  `initialize` capabilities (the payload that silently broke Gson in
++ *  this project's own AOT-compiled binary, see docs/findings.md) never
++ *  gets modeled or parsed at all -- there is no reflection path left for
++ *  it to break.
 + */
 +object Lsp {
 +

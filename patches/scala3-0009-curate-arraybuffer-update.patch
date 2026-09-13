@@ -15,7 +15,7 @@ index 10895529..ee9eed65 100644
 +      // `reflectiveFieldRead`/`reflectiveFieldWrite` if tree-interpreted --
 +      // both of which are unconditionally unavailable on this toolchain
 +      // (Scala Native's javalib has no `java.lang.reflect.Field`/
-+      // `Class#getDeclaredField` at all, unlike JVM/native-image where the
++      // `Class#getDeclaredField` at all, unlike the JVM where the real
 +      // java.lang.reflect-based implementation genuinely works). Tree-
 +      // interpreting `update` there silently replays `size0`'s stale
 +      // ORIGINAL value (always the initial capacity, never the real current

@@ -26,7 +26,7 @@ index 04cb637b..b9e42a0f 100644
 + *  here was only ever used to evaluate the small expressions that become that
 + *  reflective call's *arguments* (nested quotes, literals, named-arg desugaring).
 + *
-+ *  A JVM-free compiler can't do that: native-image is closed-world and cannot
++ *  A JVM-free compiler can't do that: this toolchain is closed-world and cannot
 + *  load a class that wasn't part of the build, and a user's macro implementation
 + *  is, by definition, unknown until this very compilation run. So this version
 + *  removes the reflective bottom-out entirely and instead *recursively
@@ -2341,9 +2341,9 @@ index 04cb637b..b9e42a0f 100644
 +    // code (ours or interpreted) needs one structurally.
 +    // `java.lang.ref.WeakReference`: a real JDK-native class (no Scala
 +    // source, no TASTy, ever) -- but its actual runtime semantics (a real
-+    // GC-aware weak reference) work fine as-is, both here and under
-+    // native-image, so just build the real host object instead of
-+    // interpreting a nonexistent constructor body.
++    // GC-aware weak reference) work fine as-is on this toolchain too, so
++    // just build the real host object instead of interpreting a
++    // nonexistent constructor body.
 +    else if fn.owner.name.toString == "WeakReference" && fn.owner.is(JavaDefined) then
 +      rawArgs.filterNot(_.isEmpty) match
 +        case v :: Nil => Some(new java.lang.ref.WeakReference(interpretTree(v)))
@@ -3147,7 +3147,7 @@ index 04cb637b..b9e42a0f 100644
 +  // scala.quoted / Quotes API: called DIRECTLY as real, statically-typed
 +  // Scala method calls. This is not reflection -- QuotesImpl, ExprImpl,
 +  // TypeImpl etc. are ordinary classes on this compiler's own classpath, so
-+  // native-image already sees and links every call site below at build time.
++  // the toolchain already sees and links every call site below at build time.
 +  // ---------------------------------------------------------------------
 +
 +  private def interpretQuotesApi(receiver: Option[Object], fn: Symbol, args: List[Object]): Option[Object] =

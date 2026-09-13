@@ -38,17 +38,17 @@ index 04d12a67..5fed8160 100644
 +  // Dynamic `-Xplugin:<jar>` loading (`Plugin.loadAllFrom`, routing through
 +  // `Plugin.load`/`instantiate`/`loaderFor` -- real reflection and
 +  // `ClassLoader#loadClass`/`URLClassLoader`) is unsupported by this
-+  // toolchain, same as `--compiler-plugin` for the GraalVM-built
-+  // `scalino-dotc` (see docs/findings.md, "Blocker 2"): a plugin must be
-+  // baked into the same build as dotc itself, not loaded by name at
-+  // runtime. Unlike the GraalVM build (which still goes through
-+  // `Class.forName` for a build-time-registered class), Scala Native has no
-+  // reflection registry at all, so this returns a hardcoded, statically
-+  // constructed instance directly -- no jar scanning, no
-+  // `plugin.properties` parsing, no classloader involved. Only one plugin
-+  // is baked in: scala-native's own `nscplugin` (`ScalaNativePlugin`,
-+  // `-Xplugin-require:scalanative`'s target), matching the existing
-+  // GraalVM-built `scalino-dotc`'s one-plugin-baked-in design.
++  // toolchain: a self-hosted, closed-world AOT build has no classloader
++  // and no reflection registry at all, so a plugin must be baked into the
++  // same build as dotc itself, not loaded by name at runtime (see
++  // docs/findings.md, "Blocker 2"). Unlike a real dotc build, which still
++  // goes through `Class.forName` for a build-time-registered class, this
++  // returns a hardcoded, statically constructed instance directly -- no
++  // jar scanning, no `plugin.properties` parsing, no classloader
++  // involved, no `Class.forName` lookup of any kind. Only one plugin is
++  // baked in: scala-native's own `nscplugin` (`ScalaNativePlugin`,
++  // `-Xplugin-require:scalanative`'s target) -- this toolchain's own
++  // one-plugin-baked-in design.
 +  protected def loadRoughPluginsList(using Context): List[Plugin] =
 +    List(new scala.scalanative.nscplugin.ScalaNativePlugin())
  

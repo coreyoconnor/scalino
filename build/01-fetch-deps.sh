@@ -55,17 +55,18 @@ cs fetch \
 
 echo "== LSP server deps (hand-rolled JSON-RPC + jsoniter-scala, no lsp4j/Gson) =="
 # Previously lsp4j + Gson (reflection-based) -- replaced after discovering a
-# GraalVM native-image-specific pathology where Gson's reflective TypeAdapter
-# construction for a real editor's full-sized `initialize` capabilities
-# payload silently never completes under native-image (works fine under a
-# real JVM with the identical bytes/classes -- see docs/findings.md "JVM-free
-# language server (LSP)"). dotty.tools.languageserver now implements the
-# JSON-RPC/LSP wire protocol by hand (Main.scala) with hand-written
-# jsoniter-scala JsonValueCodec instances (no JsonCodecMaker macro derivation:
-# this project's own macro interpreter -- patches/scala3-0001 -- isn't
-# guaranteed to expand arbitrary third-party compile-time macros, and this
-# sidesteps that risk entirely) -- compile-time-generated-equivalent, fully
-# reflection-free parsing, both at runtime and under native-image.
+# pathology specific to this project's closed-world, AOT-compiled Scala
+# Native binaries: Gson's reflective TypeAdapter construction for a real
+# editor's full-sized `initialize` capabilities payload silently never
+# completes there (works fine under a real JVM with the identical
+# bytes/classes -- see docs/findings.md "JVM-free language server (LSP)").
+# dotty.tools.languageserver now implements the JSON-RPC/LSP wire protocol
+# by hand (Main.scala) with hand-written jsoniter-scala JsonValueCodec
+# instances (no JsonCodecMaker macro derivation: this project's own macro
+# interpreter -- patches/scala3-0001 -- isn't guaranteed to expand arbitrary
+# third-party compile-time macros, and this sidesteps that risk entirely) --
+# compile-time-generated-equivalent, fully reflection-free parsing, both at
+# runtime and in the AOT-compiled binary.
 cs fetch "com.github.plokhotnyuk.jsoniter-scala:jsoniter-scala-core_3:2.37.3" \
   --classpath | tr -d '\r' > "$WORK/lsp.cp"
 

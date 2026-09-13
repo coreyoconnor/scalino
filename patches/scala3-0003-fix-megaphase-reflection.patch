@@ -12,9 +12,9 @@ index 871cab52..840b4cd4 100644
    /** Does `phase` contain a redefinition of method `name`?
     *  (which is a method of MiniPhase)
 +   *
-+   *  Reflection-free by design: unlike GraalVM native-image (which can
-+   *  register arbitrary classes for reflection at build time via a tracing
-+   *  agent), Scala Native has no general `Class#getDeclaredMethods` --
++   *  Reflection-free by design: unlike the JVM (which supports arbitrary
++   *  reflection over any class at runtime), Scala Native has no general
++   *  `Class#getDeclaredMethods` at all --
 +   *  only the narrow, per-class, opt-in `@EnableReflectiveInstantiation`
 +   *  mechanism, which doesn't cover this open-ended "every MiniPhase
 +   *  subtype" pattern (see docs/findings.md, "Blocker A"). `cls.getName`/

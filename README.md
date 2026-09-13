@@ -6,11 +6,10 @@ Write, build, and run Scala 3 without installing a JVM. `scalino` compiles
 straight to a native executable via Scala Native — no bytecode, no JIT, no
 `java` on your machine at all.
 
-The compiler and LSP server are themselves self-hosted: compiled by dotc from
-their own patched source, targeting Scala Native directly, so nothing you run
-day to day touches a JVM. The one holdout is `scalino-linkdriver` (the
-NIR→native linker), still built with GraalVM native-image — see
-[`docs/findings.md`](docs/findings.md) for why.
+The compiler, linker, and LSP server are all themselves self-hosted: compiled
+by dotc from their own patched source, targeting Scala Native directly, so
+nothing you run day to day touches a JVM — see
+[`docs/findings.md`](docs/findings.md) for the full story.
 
 Today: compiler + linker + build tool (`scalino`). Next: full editor support —
 see [Status](#status).
@@ -123,14 +122,13 @@ quote-pattern matching (`case '{ ... } => `) is the main known gap. Full
 verified/blocked/remaining breakdown in [`docs/findings.md`](docs/findings.md).
 
 The LSP server works too, and as of 2026-09-07 is self-hosted the same way
-as the compiler — no GraalVM native-image anywhere in the binary. Verified
-against a real native binary on both a hand-written project and a real
-multi-package third-party project, and end-to-end in actual Zed.
+as the compiler — no JVM anywhere in the binary. Verified against a real
+native binary on both a hand-written project and a real multi-package
+third-party project, and end-to-end in actual Zed.
 
 ## Build from source
 
-Requires GraalVM JDK 21+ (with `native-image`), `sbt`, `clang`, `coursier`
-(`cs`), `git`.
+Requires a JDK 21+, `sbt`, `clang`, `coursier` (`cs`), `git`.
 
 ```
 ./build/all.sh

@@ -1,22 +1,39 @@
-# Findings from the native-image spike
+# Findings from the self-hosting journey
 
-Background for the comments in `build/*.sh`. Scala 3 only, GraalVM
-native-image approach (see decision log below).
+Background for the comments in `build/*.sh`. Scala 3 only.
+
+**Note on the sections below through "Confirmed working: full pipeline, zero
+JVM at runtime" and "JVM-free language server (LSP)": these describe the
+project's original packaging strategy (2026, before 09-07), where every
+shipped binary (`scalino-dotc`, `scalino-linkdriver`, `scalino-lsp`) was a
+GraalVM native-image AOT build of published, unmodified JVM bytecode.** That
+approach has since been fully superseded: as of the "Self-hosting" sections
+further down (2026-09-07 onward, `scalino-linkdriver` last, 2026-09-10), the
+entire toolchain is self-hosted instead -- dotc compiled by itself down to
+Scala Native, with zero GraalVM/native-image anywhere in any shipped binary.
+The blockers, root causes, and fixes below are kept for the historical
+record and because most of the underlying reasoning (no `jrt:/`, no dynamic
+class loading, no reflection-heavy JSON libs) carries over unchanged to the
+self-hosted binaries -- it was never really "a GraalVM thing", it's "a
+closed-world AOT binary with no real JVM install" thing, and GraalVM
+native-image was just this project's first binary of that shape.
 
 ## Decisions made
 
 - **Packaging strategy: GraalVM native-image for now**, not (yet) full
   self-hosting (compiling dotc itself down to Scala Native). Originally
   ruled out here as "multi-year/high-risk given dotty's deep ties to the
-  JVM (zinc, java.nio, reflection)" -- that one-line framing is now stale;
-  see "Toward self-hosting scalino-dotc/scalino-lsp on scala-native" below,
-  which walks the actual reasoning back to "many months, not multi-year"
-  after real, file:line-level investigation, and "Self-hosting, in
-  progress" for real fixes landed against that scoping. native-image only
-  needs a JVM at *build* time, never at runtime, which remains true of the
-  self-hosting approach too (a real JVM is still used at scalino's own
-  build time to run dotc-on-the-JVM and code-generation tools; only the
-  *shipped* `scalino-dotc`/`scalino-lsp` binaries stop needing GraalVM).
+  JVM (zinc, java.nio, reflection)" -- that one-line framing turned out to
+  be wrong; see "Toward self-hosting scalino-dotc/scalino-lsp on
+  scala-native" below, which walks the actual reasoning back to "many
+  months, not multi-year" after real, file:line-level investigation, and
+  "Self-hosting, in progress" for the real fixes landed against that
+  scoping, all the way through to full self-hosting of every shipped
+  binary. native-image only needed a JVM at *build* time, never at runtime,
+  which remains true of the self-hosting approach too (a real JVM is still
+  used at scalino's own build time to run dotc-on-the-JVM and
+  code-generation tools; only the *shipped* binaries stop needing a JVM at
+  all, GraalVM included).
 - Macros that currently run compiled JVM bytecode at compile time are
   re-routed through **our own from-scratch tree interpreter** instead (not
   the upstream `tasty-interpreter` project, which was incomplete) — see
@@ -51,10 +68,15 @@ required plugin", no other diagnostic).
 dotc (same `-cp`). At runtime, `-Xplugin:<jar>` still needs to point at a real
 jar (dotc reads `plugin.properties` from it), but the classes it names are
 already resident in the image, so `Class.forName` succeeds. Reflection
-metadata for the plugin's classes is captured via the native-image tracing
+metadata for the plugin's classes was captured via the native-image tracing
 agent (`-agentlib:native-image-agent=...`) and checked into
-`agent-config/dotc/`. See `build/03-build-scalino-dotc.sh` and
-`build/05-regen-agent-config.sh`.
+`agent-config/dotc/`. (Both the native-image build this applied to and the
+tracing script/`agent-config/` directory itself are gone now -- see the
+"Self-hosting" sections below; kept here only as the historical record of
+why plugin-baking was necessary in the first place, and the self-hosted
+`scalino-dotc` still bakes `nscplugin` in the same way, for the same
+"no dynamic plugin loading" reason, just with no reflection tracing needed
+since the self-hosted binary never does reflective `Class.forName` at all.)
 
 This generalizes: any dotc plugin we want to support has to be baked in at
 image-build time. There is no dynamic plugin loading in the shipped binary.
@@ -83,6 +105,9 @@ mistake (missing symbols during linking, or `UndefinedBehaviorError` crashes).
 
 ## Confirmed working: full pipeline, zero JVM at runtime
 
+(Historical -- describes the original native-image-built pipeline; see the
+note at the top of this document.)
+
 `scalino-dotc` (dotc + nscplugin baked in) compiles `.scala` → `.nir`, and a
 second native-image binary (`scalino-linkdriver`, wrapping scala-native's
 `tools_3` link API) drives clang to turn `.nir` into a native executable —
@@ -105,16 +130,17 @@ patched via `patches/0001-own-implementation-tasty-interpreter.patch`
 (applied by `build/00b-setup-vendor.sh`, baked into `scalino-dotc` by
 `build/03a-patch-compiler.sh`).
 
-**How upstream does it, and why that can't survive native-image:** dotc
-expands `inline def foo = ${ fooImpl }` by reflectively loading `fooImpl`'s
-already-compiled classfile and having the real JVM execute the real bytecode
-(`java.lang.reflect.Method.invoke` off a `URLClassLoader` built from
-`-classpath`). Tree-walking was only ever used to evaluate the small
-expressions that become that reflective call's *arguments*. native-image is
-closed-world AOT — it cannot load a class that wasn't part of the build, and
-a user's macro implementation is by definition unknown until this
-compilation run. There is no reflection config that fixes this; the
-reflective bottom-out has to go away entirely.
+**How upstream does it, and why that can't survive a closed-world AOT
+binary:** dotc expands `inline def foo = ${ fooImpl }` by reflectively
+loading `fooImpl`'s already-compiled classfile and having the real JVM
+execute the real bytecode (`java.lang.reflect.Method.invoke` off a
+`URLClassLoader` built from `-classpath`). Tree-walking was only ever used to
+evaluate the small expressions that become that reflective call's
+*arguments*. Neither GraalVM native-image nor a self-hosted Scala Native
+binary can survive this: both are closed-world AOT — they cannot load a
+class that wasn't part of the build, and a user's macro implementation is by
+definition unknown until this compilation run. There is no reflection config
+that fixes this; the reflective bottom-out has to go away entirely.
 
 **Design:** recursively interpret the callee's own body from its typed tree
 (`Symbol.defTree`), walking arbitrarily deep into the macro's call graph,
@@ -123,8 +149,8 @@ with two reflection-free escape hatches:
   `Seq`/collections basics) implemented natively in Scala, and
 - the `scala.quoted`/`Quotes` API surface, called as ordinary direct Scala
   method calls into `QuotesImpl`/`ExprImpl` — not reflection, since those
-  classes are already statically linked into this compiler binary and
-  native-image sees every such call site at build time like any other code.
+  classes are already statically linked into this compiler binary and the
+  AOT build sees every such call site at build time like any other code.
 
 **Cross-module macros work, better than expected.** `Symbol.defTree` is only
 populated for symbols whose tree was "retained" (`-Yretain-trees`). It turns
@@ -303,16 +329,17 @@ below -- not a bounded gap, an architectural one). Watch mode and
 **`--compiler-plugin`/`-P`/`//> using plugin`: not implementable as a
 CLI-level gap, deliberately skipped.** Real scala-cli loads a user-given
 plugin jar into dotc reflectively at runtime. This toolchain's dotc is
-itself a native-image binary, and native-image's closed-world AOT
-reflection means `Class.forName` only ever succeeds for classes resident
-in the image at *build* time (see "Blocker 2" above, which is the same
-constraint for the one plugin scalino already ships baked in,
-`nscplugin`). There is no code path by which a `-Xplugin:<arbitrary jar
-picked at runtime>` could ever load a class native-image didn't see when
+itself a closed-world AOT binary (originally GraalVM native-image, now a
+self-hosted Scala Native binary -- the constraint is identical either way),
+and that closed-world reflection means `Class.forName` only ever succeeds
+for classes resident in the binary at *build* time (see "Blocker 2" above,
+which is the same constraint for the one plugin scalino already ships baked
+in, `nscplugin`). There is no code path by which a `-Xplugin:<arbitrary jar
+picked at runtime>` could ever load a class the build didn't see when
 `scalino-dotc` itself was built -- so unlike every other item in this
 section, this one can't be closed by adding CLI/directive parsing; it
 would need a from-scratch alternative to reflective plugin loading
-(e.g. a fixed registry of known plugins baked in at image-build time,
+(e.g. a fixed registry of known plugins baked in at build time,
 `kind-projector` included), which is future work, not a quick parity fix.
 
 ### `scalino`: second CLI-parity pass -- directive/flag aliases, jars, repositories (2026-09-06)
@@ -1820,6 +1847,12 @@ Picked up items 1-3 from the list above: wire the self-hosted linkdriver into th
 - **Not fixed by raising the configured max heap.** `GC_MAXIMUM_HEAP_SIZE` defaults to `SIZE_MAX` already (scala-native immix's own `UNLIMITED_HEAP_SIZE` constant) -- explicitly setting it to `14g` on this 16GB machine made no difference, same fast failure.
 - **First hypothesis (concurrent `Interflow.optimize` invocations each cloning a large shared map) was wrong.** There is only ONE `Interflow` instance / one `optimize()` call for the whole program, not one per thread -- built and shipped a targeted fix (a dedicated, deliberately undersized `ExecutionContext` just for the `Interflow.optimize` call site, `ScalaNative.scala`) and confirmed via a live debug marker that it *was* being reached and running with only 1 thread -- and it crashed anyway, in the exact same way, immediately. This disproved the hypothesis outright rather than just failing to fix it: the real crash site, traced via the actual stack trace, is `scala.scalanative.linker.Reach.track`/`reachAllocation` -- and `Reach.scala` has **zero** `ExecutionContext`/`Future` usage anywhere in it (confirmed by grep) -- it is purely single-threaded already. No amount of capping concurrency touches this code path at all.
 - **A global concurrency cap (`SCALANATIVE_LINK_THREADS=1`, serializing the entire link pipeline via a new env-var-gated executor size in `Build.scala`) succeeded once**, in isolation, via a direct manual invocation -- a full, real, successful link of dotc's own NIR into a working executable, ~20 minutes wall-clock (vs. ~35s under GraalVM). But **it failed again on retry through the real build script**, with the identical fast `Reach`-phase crash. This machine has real, fluctuating memory pressure from ordinary desktop use (browser, Slack, etc. -- confirmed via `vm_stat`: ~6.5-6.9GB free at the time of the failing retries) -- the one success was very likely favorable timing against that contention, not a genuine, reliable fix. `Reach`'s own sequential reachability walk over ~77K methods appears to need more peak memory than is reliably available here, independent of concurrency.
+
+## Migrated `scalino-linkdriver` off GraalVM native-image for real, closing out the last holdout (2026-09-10)
+
+Sidesteps the memory blocker above rather than fixing it: `scalino-linkdriver` never needed to link a self-hosted copy of *itself* through the memory-hungry, self-hosted `Reach` pipeline in the first place -- the two are independent concerns that the arc above conflated. `04-build-scalino-linkdriver.sh` now compiles `src/LinkDriver.scala` with the normal JVM-hosted dotc+nscplugin (same as every other build step already does) and links it with `tools.cp`'s ordinary, JVM-runnable `tools_3` (not the self-hosted `tools_native0.5_3` from the proof-of-concept above) driving clang directly -- no GraalVM `native-image` invocation, no `-H:ConfigurationFileDirectories`/`agent-config/scalino-linkdriver` reachability tracing, no `NATIVE_IMAGE`/`GRAAL_HOME` requirement in `00-env.sh` at all anymore. This is a plain Scala Native build, the same recipe `03-build-scalino-dotc.sh` and `08-build-scalino-lsp.sh` already use for their own link step -- it does not depend on, or wait on, a resolution to the `Reach`/GC memory blocker documented above (that blocker is specific to linking dotc's own ~77K-method NIR output through a *self-hosted* linkdriver binary, an orthogonal, still-open problem if that path is ever revisited).
+
+**Bottom line, superseding the "GraalVM stays for this one binary" conclusion above**: every shipped binary (`scalino-dotc`, `scalino-linkdriver`, `scalino-lsp`, `scalino`) is now built without GraalVM/native-image anywhere in this toolchain.
 - **Root cause, to the extent it was pinned down**: `Reach.process()`'s sequential, single-threaded walk building its own `tracked: HashMap[Global, ...]` over every reachable global in a program the size of dotc's own compiler is genuinely memory-heavy, and Scala Native's Immix GC does not handle this gracefully on a machine without several free GB of headroom at that exact moment -- whether this is "just needs more RAM" or a real, fixable GC/allocator inefficiency (fragmentation under load, over-eager retention, something else) was not conclusively determined; that would need real GC-level profiling, out of scope for this pass.
 
 **Given this genuinely isn't a quick fix, and per this whole arc's own standing rule (stop and document rather than force forward past a real problem), all linkdriver-self-hosting changes were reverted** back to the state from before this pass: `src/LinkDriver.scala`, `build/00-env.sh`, `vendor/scala-native`'s `tools_3/build/{Build,ScalaNative}.scala`, `build/04-build-scalino-linkdriver.sh`, `build/08-build-scalino-lsp.sh`'s link step, and the README/packaging text describing `scalino-linkdriver` as self-hosted. One real mistake caught and fixed during the revert: `git checkout -- <file>` inside the `vendor/scala-native` clone reverts all the way to the pristine upstream commit, not just this pass's edits -- it silently undid part of the already-existing, legitimate `patches/scala-native-0001` (the object-file-caching fix) too, which had to be re-applied from the patch file directly (`git apply` on an isolated single-file extract of the patch) before rebuilding.

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Builds scalino-linkdriver: a standalone binary wrapping scala-native's
-# tools_3 library (NIR -> LLVM IR -> clang -> native executable). All classes
-# are known at build time (no dynamic plugin loading here), so this is a
-# plain native-image build, no reflection surgery needed beyond the agent
-# trace already captured in agent-config/scalino-linkdriver.
+# tools_3 library (NIR -> LLVM IR -> clang -> native executable). Self-hosted
+# like the rest of the toolchain: dotc compiles LinkDriver.scala to NIR, then
+# LinkDriver links itself (run on the JVM, same bootstrap step 03/08 reuse).
 #
 # Uses tools-patched.cp (04a-patch-tools.sh): fixes scala-native's
 # object-file caching for vendored C/S dependencies, which was otherwise

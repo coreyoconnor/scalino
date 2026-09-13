@@ -3,9 +3,9 @@ index 0000000..0000000 100644
 --- a/compiler/src/dotty/tools/dotc/plugins/Plugins.scala
 +++ b/compiler/src/dotty/tools/dotc/plugins/Plugins.scala
 @@ -36,8 +36,28 @@
-   // is baked in: scala-native's own `nscplugin` (`ScalaNativePlugin`,
-   // `-Xplugin-require:scalanative`'s target), matching the existing
-   // GraalVM-built `scalino-dotc`'s one-plugin-baked-in design.
+   // baked in: scala-native's own `nscplugin` (`ScalaNativePlugin`,
+   // `-Xplugin-require:scalanative`'s target) -- this toolchain's own
+   // one-plugin-baked-in design.
 +  //
 +  // Still gated on `-Xplugin-require:scalanative` actually being passed,
 +  // same as real dotc gates dynamic plugin loading on `-Xplugin`: some

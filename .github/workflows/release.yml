@@ -34,9 +34,8 @@ jobs:
           - target: macos-arm64
             os: macos-14
           # Windows x86_64 support is untested/experimental -- see
-          # docs/findings.md. No windows-arm64 leg: GraalVM ships no Windows
-          # ARM64 build at all (confirmed against graalvm.org's own download
-          # matrix), so setup-graalvm can never succeed there.
+          # docs/findings.md. No windows-arm64 leg: not a target this
+          # toolchain supports yet.
           - target: windows-x86_64
             os: windows-latest
 

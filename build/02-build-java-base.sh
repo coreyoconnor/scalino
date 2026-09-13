@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # dotc needs java.lang/java.util classfile signatures to initialize its core
 # symbol table (everything implicitly extends java.lang.Object). Normally it
-# reads these from the jrt:/ modules filesystem, but native-image binaries
-# have no real JDK install and no jrt:/ provider. Fix: extract java.base's
-# classfiles into a plain jar and point dotc at it via -javabootclasspath.
+# reads these from the jrt:/ modules filesystem, but our self-hosted Scala
+# Native binaries have no real JDK install and no jrt:/ provider. Fix:
+# extract java.base's classfiles into a plain jar and point dotc at it via
+# -javabootclasspath.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./00-env.sh

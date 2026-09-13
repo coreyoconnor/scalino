@@ -7,18 +7,18 @@ workspaceFolders, didOpen/didChange, hover, definition, completion,
 references, rename, documentSymbol, workspace/symbol) against real dotc
 compilation of build/lsp-trace-fixture.
 
-No longer wired into build/05-regen-agent-config.sh: the LSP module used
-to be lsp4j+Gson (reflection-based), and this script's job was tracing
-GraalVM native-image reflection config against realistic request shapes --
-Gson's reflective TypeAdapter construction only worked for types actually
-exercised during a traced run, and a real editor's rich `initialize`
-payload turned out to trigger a native-image-specific pathology no amount
-of extra tracing fixed (see docs/findings.md "JVM-free language server
-(LSP)"). The module is now a hand-rolled JSON-RPC/LSP implementation over
-hand-written jsoniter-scala codecs, zero reflection, so there's nothing
-left to trace -- this script is kept purely as an end-to-end functional
-test to run by hand after any change to Main.scala/Lsp.scala/
-PcLanguageServer.scala.
+No longer used to trace reflection config (that whole tracing setup is
+gone): the LSP module used to be lsp4j+Gson (reflection-based), and this
+script's job was tracing reachability config against realistic request
+shapes -- Gson's reflective TypeAdapter construction only worked for types
+actually exercised during a traced run, and a real editor's rich
+`initialize` payload turned out to trigger a pathology specific to this
+project's closed-world AOT-compiled binaries that no amount of extra
+tracing fixed (see docs/findings.md "JVM-free language server (LSP)"). The
+module is now a hand-rolled JSON-RPC/LSP implementation over hand-written
+jsoniter-scala codecs, zero reflection, so there's nothing left to trace --
+this script is kept purely as an end-to-end functional test to run by hand
+after any change to Main.scala/Lsp.scala/PcLanguageServer.scala.
 
 Usage: lsp-trace-drive.py <project-dir> <command...>
 <project-dir> must contain Model.scala, Greeter.scala, Main.scala (see
@@ -161,8 +161,8 @@ def main():
         # each level a distinct lsp4j POJO Gson must reflectively
         # instantiate/populate on the way in -- a bare `"capabilities": {}`
         # (this fixture's shape until 2026-09-05) never exercises any of
-        # that, so native-image's reachability trace never registers those
-        # types, and a real client's `initialize` request then dies with
+        # that, so the reachability trace never registers those types, and
+        # a real client's `initialize` request then dies with
         # "Type ... was never registered" the moment Gson tries to
         # deserialize e.g. ClientInfo or CompletionClientCapabilities --
         # invisible to the client (just a dead connection), only visible in
