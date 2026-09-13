@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drives a comprehensive real-editor-shaped LSP request sequence against a
 dotty.tools.languageserver.Main process launched with the given command --
-a full functional smoke test exercising every endpoint DottyLanguageServer
+a full functional smoke test exercising every endpoint PcLanguageServer
 implements (initialize with a real editor's full capabilities+
 workspaceFolders, didOpen/didChange, hover, definition, completion,
 references, rename, documentSymbol, workspace/symbol) against real dotc
@@ -18,7 +18,7 @@ of extra tracing fixed (see docs/findings.md "JVM-free language server
 hand-written jsoniter-scala codecs, zero reflection, so there's nothing
 left to trace -- this script is kept purely as an end-to-end functional
 test to run by hand after any change to Main.scala/Lsp.scala/
-DottyLanguageServer.scala.
+PcLanguageServer.scala.
 
 Usage: lsp-trace-drive.py <project-dir> <command...>
 <project-dir> must contain Model.scala, Greeter.scala, Main.scala (see

@@ -8,7 +8,7 @@ class Diagnostic() {
   private var _message: Either[String, MarkupContent] = null
   private var _severity: DiagnosticSeverity = null
   private var _source: String = null
-  private var _code: java.lang.Integer = null
+  private var _code: Either[String, java.lang.Integer] = null
   private var _tags: ju.List[DiagnosticTag] = null
   private var _data: Object = null
 
@@ -39,11 +39,13 @@ class Diagnostic() {
   def getSource(): String = _source
   def setSource(source: String): Unit = _source = source
 
-  // Real lsp4j types `code` as `Either<String, Integer>`; only the plain-Int
-  // overload is ever called (`DiagnosticProvider.scala`), so that's all this
-  // shim exposes.
-  def getCode(): java.lang.Integer = _code
-  def setCode(code: java.lang.Integer): Unit = _code = code
+  // Real lsp4j types `code` as `Either<String, Integer>` with 3 setter
+  // overloads (Either/String/Integer, confirmed via javap of the real jar).
+  // getCode() has ONLY the Either-typed signature -- PcLanguageServer.scala
+  // (this shim's own consumer) unwraps it.
+  def getCode(): Either[String, java.lang.Integer] = _code
+  def setCode(code: java.lang.Integer): Unit = _code = if (code == null) null else Either.forRight(code)
+  def setCode(code: String): Unit = _code = if (code == null) null else Either.forLeft(code)
 
   def getTags(): ju.List[DiagnosticTag] = _tags
   def setTags(tags: ju.List[DiagnosticTag]): Unit = _tags = tags

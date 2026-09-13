@@ -37,3 +37,39 @@ index 22baa696..61b9a826 100644
              sym.decodedName.toString(),
              sym.sourcePos.span.point
            )
+diff --git a/compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala b/compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala
+index 475c2520..ea386f2d 100644
+--- a/compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala
++++ b/compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala
+@@ -169,8 +169,8 @@ private[semanticdb] object ExtractSemanticDB:
+       schema = Schema.SEMANTICDB4,
+       language = Language.SCALA,
+       uri = Tools.mkURIstring(Paths.get(relPath(source, sourceRoot))),
+-      text = if semanticdbText then String(source.content) else "",
+-      md5 = internal.MD5.compute(String(source.content)),
++      text = if semanticdbText then String(source.content()) else "",
++      md5 = internal.MD5.compute(String(source.content())),
+       symbols = symbolInfos,
+       occurrences = occurrences,
+       synthetics = synthetics,
+diff --git a/compiler/src/dotty/tools/dotc/semanticdb/PPrint.scala b/compiler/src/dotty/tools/dotc/semanticdb/PPrint.scala
+index f96a4839..b30ecfdb 100644
+--- a/compiler/src/dotty/tools/dotc/semanticdb/PPrint.scala
++++ b/compiler/src/dotty/tools/dotc/semanticdb/PPrint.scala
+@@ -328,14 +328,14 @@ private[semanticdb] class SyntheticPrinter(symtab: PrinterSymtab, source: Source
+       /** get the line length of a given line */
+       def lineLength(line: Int): Int =
+         val isLastLine = source.lineToOffsetOpt(line).nonEmpty && source.lineToOffsetOpt(line + 1).isEmpty
+-        if isLastLine then source.content.length - source.lineToOffset(line) - 1
++        if isLastLine then source.content().length - source.lineToOffset(line) - 1
+         else source.lineToOffset(line + 1) - source.lineToOffset(line) - 1 // -1 for newline char
+ 
+       val start = source.lineToOffset(range.startLine) +
+         math.min(range.startCharacter, lineLength(range.startLine))
+       val end = source.lineToOffset(range.endLine) +
+         math.min(range.endCharacter, lineLength(range.endLine))
+-      new String(source.content, start, end - start)
++      new String(source.content(), start, end - start)
+ 
+ 
+   // def pprint(tree: s.Tree, range: Option[Range]): String =

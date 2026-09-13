@@ -22,29 +22,30 @@ import Lsp.given
 /** Thin LSP layer over `scala3-presentation-compiler` (Metals' PC engine),
  *  reusing `Main.scala`'s existing JSON-RPC transport and `Lsp.scala`'s
  *  existing jsoniter-scala wire model -- no lsp4j, no Gson, no reflection,
- *  matching `DottyLanguageServer`'s own "no reflection anywhere" design (see
- *  its doc comment). Real lsp4j/mtags-interfaces/mtags-shared types are
- *  satisfied by the in-tree shim at `lsp-shim/` (not real jars) -- see
- *  `~/.claude/plans/lovely-jumping-anchor.md` for the full design.
+ *  the same "no reflection anywhere" design the old (now removed)
+ *  `DottyLanguageServer` backend used. Real lsp4j/mtags-interfaces/
+ *  mtags-shared types are satisfied by the in-tree shim at `lsp-shim/` (not
+ *  real jars).
  *
- *  Prototype scope: completion/hover/definition/references/rename/
- *  documentHighlight/signatureHelp + didOpen/didChange/didClose diagnostics.
+ *  Scope: completion/hover/definition/references/rename/documentHighlight/
+ *  signatureHelp + didOpen/didChange/didClose diagnostics.
  *  presentation-compiler has no documentSymbol/workspaceSymbol/implementation
  *  equivalent (those come from Metals' own BSP-driven indexer, not the PC
- *  itself) -- `Main.scala`'s `-pc` dispatch just doesn't wire those methods.
+ *  itself) -- `Main.scala`'s dispatch just doesn't wire those methods.
  */
 class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Unit) { thisServer =>
 
   private var pc: RawScalaPresentationCompiler = null
   private val buffers: mutable.Map[URI, String] = mutable.Map.empty
 
-  /** Same on-disk config `DottyLanguageServer` reads (`scalino setup-ide`'s
-   *  output) -- reused so both backends work from the same project setup. */
+  /** Same on-disk config the old `DottyLanguageServer` backend used to read
+   *  (`scalino setup-ide`'s output). */
   private def loadConfig(rootUri: String): List[ProjectConfig] = {
-    val configFile = new File(new URI(rootUri + '/' + DottyLanguageServer.IDE_CONFIG_FILE))
+    val IDE_CONFIG_FILE = ".scalino-build/scalino-lsp.json"
+    val configFile = new File(new URI(rootUri + '/' + IDE_CONFIG_FILE))
     if (!configFile.exists)
       throw new java.io.FileNotFoundException(
-        s"${DottyLanguageServer.IDE_CONFIG_FILE} not found at $rootUri -- run `scalino setup-ide <sources...>` in the project root first")
+        s"$IDE_CONFIG_FILE not found at $rootUri -- run `scalino setup-ide <sources...>` in the project root first")
     readFromArray(Files.readAllBytes(configFile.toPath))(using projectConfigListCodec)
   }
 
@@ -69,11 +70,17 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
           configs.flatMap(c => c.classDirectory +: c.dependencyClasspath).distinct.map(Paths.get(_))
         val sourceDirs: Seq[Path] =
           configs.flatMap(_.sourceDirectories).distinct.map(Paths.get(_))
+        // Includes `-javabootclasspath ...` -- without it dotc's own
+        // Definitions.init() can't find java.lang.Object at all (same
+        // config field DottyLanguageServer already threads through, see
+        // its own `config.compilerArguments` usage).
+        val compilerArgs: List[String] =
+          configs.flatMap(_.compilerArguments).distinct
         thisServer.synchronized {
           pc = RawScalaPresentationCompiler(
             buildTargetIdentifier = "scalino",
             classpath = classpath,
-            options = Nil,
+            options = compilerArgs,
             sourcePath = () => sourceDirs.asJava
           )
         }
@@ -157,7 +164,7 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
     val diags = requirePc().didChange(CompilerVirtualFileParams(uri, textOf(uri)))
     val lspDiags = diags.asScala.map { d =>
       val severity = Option(d.getSeverity()).map(_.getValue()).getOrElse(1)
-      Diagnostic(toRange(d.getRange()), eitherToString(d.getMessage()), severity, Option(d.getSource()).getOrElse(""), Option(d.getCode()).map(_.toString).getOrElse(""))
+      Diagnostic(toRange(d.getRange()), eitherToString(d.getMessage()), severity, Option(d.getSource()).getOrElse(""), Option(d.getCode()).map(eitherToString).getOrElse(""))
     }.toList
     publishDiagnostics(uriString, lspDiags)
   }
@@ -247,4 +254,12 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
       activeSignature = Option(result.getActiveSignature()).map(_.intValue).getOrElse(-1)
     )
   }
+
+  // presentation-compiler has no documentSymbol/workspace-symbol/implementation
+  // equivalent -- those come from Metals' own BSP-driven indexer, not the PC
+  // itself (see this class's doc comment above). Stubbed empty so Main.scala's
+  // shared ServerBackend dispatch doesn't need a PC-specific branch for them.
+  def documentSymbol(params: DocumentSymbolParams): List[SymbolInformation] = Nil
+  def symbol(params: WorkspaceSymbolParams): List[SymbolInformation] = Nil
+  def implementation(params: TextDocumentPositionParams): List[Location] = Nil
 }

@@ -15,7 +15,7 @@ class CompletionItem() {
   private var _insertText: String = null
   private var _insertTextFormat: InsertTextFormat = null
   private var _insertTextMode: InsertTextMode = null
-  private var _textEdit: TextEdit = null
+  private var _textEdit: Either[TextEdit, InsertReplaceEdit] = null
   private var _additionalTextEdits: ju.List[TextEdit] = null
   private var _command: Command = null
   private var _data: Object = null
@@ -55,11 +55,16 @@ class CompletionItem() {
   def getInsertTextMode(): InsertTextMode = _insertTextMode
   def setInsertTextMode(insertTextMode: InsertTextMode): Unit = _insertTextMode = insertTextMode
 
-  // Real lsp4j types `textEdit` as `Either<TextEdit, InsertReplaceEdit>`; only
-  // the plain-`TextEdit` shape is ever constructed by presentation-compiler
-  // (`CompletionProvider.scala`), so that's all this shim exposes.
-  def getTextEdit(): TextEdit = _textEdit
-  def setTextEdit(textEdit: TextEdit): Unit = _textEdit = textEdit
+  // Real lsp4j has ONLY the Either-typed overload (confirmed via javap of the
+  // real jar -- no plain-TextEdit overload exists). presentation-compiler's
+  // own `item.setTextEdit(textEdit)` call (a plain TextEdit) actually
+  // resolves through mtags-shared's `CommonMtagsEnrichments.XtensionCompletionItemData.setTextEdit`
+  // extension method (which wraps in `Either.forLeft` before calling this),
+  // not through a plain member overload -- confirmed by real-jar compile
+  // (invocation 1) succeeding with zero errors despite the real jar having
+  // no plain overload.
+  def getTextEdit(): Either[TextEdit, InsertReplaceEdit] = _textEdit
+  def setTextEdit(textEdit: Either[TextEdit, InsertReplaceEdit]): Unit = _textEdit = textEdit
 
   def getAdditionalTextEdits(): ju.List[TextEdit] = _additionalTextEdits
   def setAdditionalTextEdits(additionalTextEdits: ju.List[TextEdit]): Unit = _additionalTextEdits = additionalTextEdits
