@@ -986,7 +986,7 @@ index 7f269eec..d2cddb3d 100644
  package languageserver
  
 -import java.util.function.Consumer
-+import java.io.{FileWriter, InputStream, OutputStream, PrintWriter}
++import java.io.{File, FileWriter, InputStream, OutputStream, PrintWriter}
 +import java.time.Instant
 +import java.util.concurrent.LinkedBlockingQueue
  
@@ -1001,7 +1001,7 @@ index 7f269eec..d2cddb3d 100644
 -import org.eclipse.lsp4j.services._
 -import org.eclipse.lsp4j.launch._
 -import org.eclipse.lsp4j.jsonrpc.Launcher
-+/** Appends a timestamped line per dispatched RPC method to `.scalino-lsp.log`
++/** Appends a timestamped line per dispatched RPC method to `.scalino-build/scalino-lsp.log`
 + *  in the server's working directory (the editor's project root -- see
 + *  `Main.runStdio`) -- a real log file the server writes itself, rather
 + *  than relying on the editor to capture/display stderr (Zed, e.g., only
@@ -1011,7 +1011,9 @@ index 7f269eec..d2cddb3d 100644
 + *  rather than a reason to fail startup. */
 +object Log {
 +  private val writer =
-+    try Some(new PrintWriter(new FileWriter(".scalino-lsp.log", /* append = */ true), /* autoFlush = */ true))
++    try
++      new File(".scalino-build").mkdirs()
++      Some(new PrintWriter(new FileWriter(".scalino-build/scalino-lsp.log", /* append = */ true), /* autoFlush = */ true))
 +    catch { case _: Throwable => None }
  
 -/** Run the Dotty Language Server.
@@ -1091,7 +1093,7 @@ index 7f269eec..d2cddb3d 100644
 +    // Error type = 1, see ShowMessageParams's doc comment (Lsp.scala) --
 +    // used below so a failed *notification* (didOpen/didChange/didClose,
 +    // none of which have a response channel to carry an error back on) is
-+    // still visible in the editor, not just logged to .scalino-lsp.log.
++    // still visible in the editor, not just logged to .scalino-build/scalino-lsp.log.
 +    def sendShowMessage(message: String): Unit =
 +      sendNotification("window/showMessage", writeToArray(ShowMessageParams(1, message))(using showMessageParamsCodec))
 +

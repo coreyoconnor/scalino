@@ -63,7 +63,7 @@ pick this directory (`zed-extension/`).
    `.scala` files under the plain `Scala` language.
 4. Open the project in Zed. Check `cmd-shift-p` -> "dev: open language
    server logs" if diagnostics/hover don't show up, and this extension's own
-   `.scalino-lsp.log` (written to the project root -- see `Log` in
+   `.scalino-build/scalino-lsp.log` (written to the project root -- see `Log` in
    `vendor/scala3/language-server/src/dotty/tools/languageserver/Main.scala`)
    for a full timestamped trace of every request/notification it handled.
 

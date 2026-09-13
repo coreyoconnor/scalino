@@ -12,5 +12,4 @@
 *.nir
 /zed-extension/target/
 .zed/
-.scalino-lsp.log
 .DS_Store
