@@ -2017,63 +2017,17 @@ object ScalinoCli:
     Files.write(configPath, json.getBytes("UTF-8"))
     println(s"scalino: wrote ${configPath.toAbsolutePath} -- point dist/scalino-lsp (or an editor's LSP binary override) at this project")
 
-    // Also pin Zed's scalino-lsp binary path (zed-extension/README.md
-    // step 4, "optional" there) so opening the project in Zed works without
-    // dist/ on PATH -- `dist` is resolved from scalino's own binary location
-    // (see val dist above), so this is correct however the toolchain was
-    // installed. Plus a `file_types` override assigning .scala to the
-    // zed-extension's own "Scala (scalino)" language (zed-extension/
-    // languages/scala/config.toml) -- without it, if metals-zed is also
-    // installed, Zed arbitrarily picks one extension's "Scala"-named
-    // language for .scala files, and that pick isn't stable across a
-    // dev-extension reinstall (see zed-extension/README.md). Only written
-    // if .zed/settings.json doesn't exist yet: a real settings file may
-    // hold unrelated keys this hand-rolled JSON writer isn't equipped to
-    // merge into.
-    val lspBinaryPath = Paths.get(dist, "scalino-lsp").toString
-    val scalaFileTypes = jsonArr(List("scala"))
-    val zedSettingsPath = Paths.get(".zed", "settings.json")
-    if !Files.exists(zedSettingsPath) then
-      Files.createDirectories(zedSettingsPath.getParent)
-      val zedJson =
-        s"""{
-           |  "lsp": {
-           |    "scalino-lsp": {
-           |      "binary": {
-           |        "path": ${jsonStr(lspBinaryPath)},
-           |        "arguments": ${jsonArr(List("-stdio"))}
-           |      }
-           |    }
-           |  },
-           |  "file_types": {
-           |    "Scala (scalino)": $scalaFileTypes
-           |  }
-           |}
-           |""".stripMargin
-      Files.write(zedSettingsPath, zedJson.getBytes("UTF-8"))
-      println(s"scalino: wrote ${zedSettingsPath.toAbsolutePath} -- pins Zed's scalino-lsp binary to $lspBinaryPath and assigns .scala to the \"Scala (scalino)\" language")
-    else
-      println(s"scalino: ${zedSettingsPath.toAbsolutePath} already exists -- leaving it alone; add this to pin the LSP binary and avoid colliding with metals-zed's own \"Scala\" language if needed:")
-      println(s"""  "lsp": { "scalino-lsp": { "binary": { "path": ${jsonStr(lspBinaryPath)} } } },""")
-      println(s"""  "file_types": { "Scala (scalino)": $scalaFileTypes }""")
-
-    // Same idea for the VS Code extension (vscode-extension/), which reads
-    // its binary path from the "scalino-lsp.path" setting -- unlike Zed,
-    // no file_types collision to route around there (vscode-extension/
-    // README.md), so just the one key.
-    val vscodeSettingsPath = Paths.get(".vscode", "settings.json")
-    if !Files.exists(vscodeSettingsPath) then
-      Files.createDirectories(vscodeSettingsPath.getParent)
-      val vscodeJson =
-        s"""{
-           |  "scalino-lsp.path": ${jsonStr(lspBinaryPath)}
-           |}
-           |""".stripMargin
-      Files.write(vscodeSettingsPath, vscodeJson.getBytes("UTF-8"))
-      println(s"scalino: wrote ${vscodeSettingsPath.toAbsolutePath} -- pins the VS Code extension's scalino-lsp binary to $lspBinaryPath")
-    else
-      println(s"scalino: ${vscodeSettingsPath.toAbsolutePath} already exists -- leaving it alone; add this to pin the LSP binary if needed:")
-      println(s"""  "scalino-lsp.path": ${jsonStr(lspBinaryPath)}""")
+    // No editor-specific settings.json is written here anymore: install.sh
+    // symlinks scalino-lsp onto PATH alongside scalino, and both editor
+    // extensions already fall back to a PATH lookup when no explicit binary
+    // path is configured (vscode-extension/src/extension.ts's findOnPath,
+    // zed-extension/src/lib.rs's worktree.which) -- so a project checkout
+    // needs zero editor-specific config for the common case. Zed users with
+    // metals-zed also installed still need the `file_types` override
+    // documented in zed-extension/README.md to avoid Zed arbitrarily
+    // picking metals-zed's "Scala" language for .scala files -- that's a
+    // per-project editor preference, not something this command should
+    // guess at or overwrite.
 
   def main(args: Array[String]): Unit =
     if args.isEmpty then { printUsage(System.err); sys.exit(1) }

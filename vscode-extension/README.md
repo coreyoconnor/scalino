@@ -26,9 +26,12 @@ code --install-extension scalino-lsp-0.0.1.vsix
 Either way, `scalino-lsp` itself is still your own build, not
 auto-downloaded (see "Scope" below) -- steps 1-3 below are still required.
 
-1. Build `dist/scalino-lsp` (`../build/08-build-scalino-lsp.sh`, or extract
-   a release tarball) and either put `dist/` on your `PATH`, or set an
-   explicit path in step 2.
+1. Get `scalino-lsp` onto your `PATH`: `install.sh` symlinks it there
+   alongside `scalino` (see `../install.sh`). Building from source instead
+   (`../build/08-build-scalino-lsp.sh`, output at `dist/scalino-lsp`)? Put
+   `dist/` on `PATH`, or set an explicit path in step 2 -- this extension
+   falls back to its own PATH lookup (`findOnPath`, `src/extension.ts`) when
+   no explicit path is configured.
 2. Optionally, in the workspace's `.vscode/settings.json`, pin the binary
    path if it's not on `PATH`:
    ```json
@@ -43,7 +46,8 @@ auto-downloaded (see "Scope" below) -- steps 1-3 below are still required.
    dist/scalino setup-ide <your sources...>
    ```
    writes `.scalino-build/scalino-lsp.json` there (`../cli/ScalinoCli.scala`'s
-   `setup-ide` command).
+   `setup-ide` command) -- editor config (step 2) is separate and this
+   command doesn't touch it.
 4. Open the project in VS Code. Check the "Scalino LSP" output channel
    (`View` -> `Output`, pick "Scalino LSP" from the dropdown) if
    diagnostics/hover don't show up -- set `scalino-lsp.trace.server` to

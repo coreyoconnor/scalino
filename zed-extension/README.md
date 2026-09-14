@@ -13,10 +13,10 @@ extension would be enough -- in practice, if metals-zed is *also* installed
 (even just left over from before), Zed has to arbitrarily pick one
 extension's language definition for `.scala` files, and that pick isn't
 stable across a dev extension reinstall. A distinct name sidesteps the
-collision entirely: `scalino setup-ide` (step 3 below) writes a `file_types`
-override pinning `.scala` to `Scala (scalino)`, so metals-zed's own
-`language_servers.metals` entry (bound to `Scala`) never attaches to those
-files, whether or not metals-zed stays installed.
+collision entirely: pin `.scala` to `Scala (scalino)` yourself via a
+`file_types` override in Zed's `settings.json` (step 2 below), so
+metals-zed's own `language_servers.metals` entry (bound to `Scala`) never
+attaches to those files, whether or not metals-zed stays installed.
 
 ## Install
 
@@ -34,17 +34,25 @@ installing (this repo's own rustc, via Homebrew, does not ship it -- use
 `rustup`) -- then in Zed: `cmd-shift-p` -> "zed: install dev extension" ->
 pick this directory (`zed-extension/`).
 
-1. Build `dist/scalino-lsp` (`../build/08-build-scalino-lsp.sh`, or
-   extract a release tarball) and either put `dist/` on your `PATH`, or set
-   an explicit path in Zed's `settings.json` (step 2).
-2. Optionally, in Zed's `settings.json`, pin the binary path if it's not on
-   `PATH`:
+1. Get `scalino-lsp` onto your `PATH`: `install.sh` symlinks it there
+   alongside `scalino` (see `../install.sh`). Building from source instead
+   (`../build/08-build-scalino-lsp.sh`, output at `dist/scalino-lsp`)? Put
+   `dist/` on `PATH`, or set an explicit path in Zed's `settings.json` (step
+   2) -- this extension falls back to Zed's own PATH lookup
+   (`worktree.which`, `src/lib.rs`) when no explicit path is configured.
+2. In Zed's `settings.json`, pin the binary path if it's not on `PATH`, and
+   -- if metals-zed is also installed -- the `file_types` override that
+   routes `.scala` to this extension's `Scala (scalino)` language instead of
+   metals-zed's `Scala`:
    ```json
    {
      "lsp": {
        "scalino-lsp": {
          "binary": { "path": "/absolute/path/to/dist/scalino-lsp" }
        }
+     },
+     "file_types": {
+       "Scala (scalino)": ["scala"]
      }
    }
    ```
@@ -53,14 +61,9 @@ pick this directory (`zed-extension/`).
    ```
    dist/scalino setup-ide <your sources...>
    ```
-   writes `.scalino-build/scalino-lsp.json` there, and -- if `.zed/settings.json` doesn't
-   already exist -- a `.zed/settings.json` pinning both the LSP binary path
-   and the `file_types` override that assigns `.scala` to this extension's
-   `Scala (scalino)` language (`../cli/ScalinoCli.scala`'s `setup-ide` command). If
-   `.zed/settings.json` already existed, `setup-ide` leaves it alone and
-   prints the JSON to add by hand -- merge in both the `lsp` and
-   `file_types` keys, or metals-zed (if also installed) keeps claiming
-   `.scala` files under the plain `Scala` language.
+   writes `.scalino-build/scalino-lsp.json` there (`../cli/ScalinoCli.scala`'s
+   `setup-ide` command) -- editor config (step 2) is separate and this
+   command doesn't touch it.
 4. Open the project in Zed. Check `cmd-shift-p` -> "dev: open language
    server logs" if diagnostics/hover don't show up, and this extension's own
    `.scalino-build/scalino-lsp.log` (written to the project root -- see `Log` in

@@ -6,11 +6,12 @@
 # Downloads the latest (or $SCALINO_VERSION-pinned) GitHub release tarball for
 # the current OS/arch, verifies its sha256 checksum, unpacks it into a
 # versioned directory under $SCALINO_INSTALL_DIR (default: ~/.local/share/scalino),
-# and symlinks `scalino` into $SCALINO_BIN_DIR (default: ~/.local/bin). scalino
-# resolves its own dist root from its real (symlink-resolved) path at
-# runtime -- see cli/selfexe/*.scala -- so a symlink here is safe and the
-# rest of dist/ (scalino-dotc, scalino-linkdriver, lib/, scalino-lsp)
-# never needs to move.
+# and symlinks `scalino` and `scalino-lsp` into $SCALINO_BIN_DIR (default:
+# ~/.local/bin) so editor LSP clients find scalino-lsp on PATH with no
+# per-project config. Both resolve their own dist root from their real
+# (symlink-resolved) path at runtime -- see cli/selfexe/*.scala -- so a
+# symlink here is safe and the rest of dist/ (scalino-dotc,
+# scalino-linkdriver, lib/) never needs to move.
 #
 # Still required on top of this, on the running machine (not bundled --
 # see docs/findings.md): `clang`/`clang++` (needed for every build, even a
@@ -93,6 +94,8 @@ fi
 mkdir -p "$bin_dir"
 ln -sf "$dest_dir/scalino" "$bin_dir/scalino"
 chmod +x "$dest_dir/scalino"
+ln -sf "$dest_dir/scalino-lsp" "$bin_dir/scalino-lsp"
+chmod +x "$dest_dir/scalino-lsp"
 
 echo "install.sh: installed scalino $tag -> $bin_dir/scalino (dist: $dest_dir)"
 
