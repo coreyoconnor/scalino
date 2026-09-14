@@ -1,0 +1,73 @@
+{
+  "name": "scalino-lsp",
+  "displayName": "Scalino LSP",
+  "description": "JVM-free Scala language server (scalino-lsp, from scalino) -- diagnostics and hover without Metals' JVM dependency.",
+  "version": "0.0.1",
+  "publisher": "lolgab",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lolgab/scalino"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages", "Linters"],
+  "activationEvents": ["onLanguage:scala", "workspaceContains:**/*.scala"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "scala",
+        "extensions": [".scala"],
+        "aliases": ["Scala"]
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Scalino LSP",
+      "properties": {
+        "scalino-lsp.path": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the scalino-lsp binary (dist/scalino-lsp). Falls back to PATH lookup if unset."
+        },
+        "scalino-lsp.args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["-stdio"],
+          "description": "Arguments passed to scalino-lsp."
+        },
+        "scalino-lsp.env": {
+          "type": "object",
+          "default": {},
+          "description": "Extra environment variables for the scalino-lsp process."
+        },
+        "scalino-lsp.initializationOptions": {
+          "type": "object",
+          "default": {},
+          "description": "Extra LSP initializationOptions passed to scalino-lsp on initialize."
+        },
+        "scalino-lsp.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace LSP communication between VS Code and scalino-lsp."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

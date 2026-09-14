@@ -415,6 +415,47 @@ object ScalinoCli:
           Files.write(marker, Array.emptyByteArray)
       catch case scala.util.control.NonFatal(_) => ()
 
+  /** Same idea as `fetchSourcesBestEffort`, but for the vendored
+   *  scala-library/scala3-library jars themselves (`dist/lib/scala-library-
+   *  $scalaVersion.jar`, `dist/lib/scala3-library_3-$scalaVersion.jar`) --
+   *  those never go through `resolveDeps` at all (`excludedArtifacts`
+   *  deliberately keeps the toolchain's own stdlib jars off the coursier-
+   *  resolved classpath, see that val's comment), so without this, go-to-
+   *  definition into stdlib symbols (`println`, `List`, ...) can never find a
+   *  sources jar no matter how many user dependencies get theirs fetched.
+   *  patches/scala3-0014 looks for `<jar>-sources.jar` as a sibling of the
+   *  jar actually on the classpath, so the fetched jar is placed directly in
+   *  `dist/lib` under that exact name -- same layout already used by the
+   *  vendored `-sources.jar`s for scala-native's own runtime libs. Best-
+   *  effort and marker-gated like its sibling above: never fails the caller,
+   *  and only attempted once per `dist` (the version is fixed for a given
+   *  build, so there's nothing to key on beyond "have we tried").
+   */
+  def fetchStdlibSourcesBestEffort(): Unit =
+    try
+      val libDir = Paths.get(dist, "lib")
+      Files.createDirectories(libDir)
+      val marker = libDir.resolve(s".stdlib-sources-fetched-${BuildInfo.scalaVersion}")
+      if !Files.exists(marker) then
+        val cs = findOnPath("cs")
+        val artifacts = List(
+          ("org.scala-lang", "scala-library"),
+          ("org.scala-lang", "scala3-library_3")
+        )
+        for (group, name) <- artifacts do
+          val jarName = s"$name-${BuildInfo.scalaVersion}.jar"
+          val destSourcesJar = libDir.resolve(s"$name-${BuildInfo.scalaVersion}-sources.jar")
+          if Files.exists(libDir.resolve(jarName)) && !Files.exists(destSourcesJar) then
+            val (code, path) = runCaptureStdout(
+              List(cs, "fetch", "--classifier", "sources", "--intransitive", s"$group:$name:${BuildInfo.scalaVersion}")
+            )
+            if code == 0 then
+              path.linesIterator.map(_.trim).find(_.nonEmpty).foreach { fetched =>
+                Files.copy(Paths.get(fetched), destSourcesJar, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+              }
+        Files.write(marker, Array.emptyByteArray)
+    catch case scala.util.control.NonFatal(_) => ()
+
   // ---------------------------------------------------------------------
   // Entry-point detection, scala-cli/Mill-style: not a source-text
   // heuristic, but a scan of the *compiled* .class files for a real
@@ -1933,6 +1974,7 @@ object ScalinoCli:
     val compileOnlyDeps = (directives.compileOnlyDeps ++ o.cliCompileOnlyDeps).distinct
     val extraCompileOnlyClasspath = resolveDeps(compileOnlyDeps, depsCache, repos)
     fetchSourcesBestEffort((allDeps ++ compileOnlyDeps).distinct, depsCache, repos)
+    fetchStdlibSourcesBestEffort()
     val options = directives.options ++ o.cliOptions
 
     val cc = computeCompileClasspath(extraClasspath, extraCompileOnlyClasspath)
@@ -2014,6 +2056,24 @@ object ScalinoCli:
       println(s"scalino: ${zedSettingsPath.toAbsolutePath} already exists -- leaving it alone; add this to pin the LSP binary and avoid colliding with metals-zed's own \"Scala\" language if needed:")
       println(s"""  "lsp": { "scalino-lsp": { "binary": { "path": ${jsonStr(lspBinaryPath)} } } },""")
       println(s"""  "file_types": { "Scala (scalino)": $scalaFileTypes }""")
+
+    // Same idea for the VS Code extension (vscode-extension/), which reads
+    // its binary path from the "scalino-lsp.path" setting -- unlike Zed,
+    // no file_types collision to route around there (vscode-extension/
+    // README.md), so just the one key.
+    val vscodeSettingsPath = Paths.get(".vscode", "settings.json")
+    if !Files.exists(vscodeSettingsPath) then
+      Files.createDirectories(vscodeSettingsPath.getParent)
+      val vscodeJson =
+        s"""{
+           |  "scalino-lsp.path": ${jsonStr(lspBinaryPath)}
+           |}
+           |""".stripMargin
+      Files.write(vscodeSettingsPath, vscodeJson.getBytes("UTF-8"))
+      println(s"scalino: wrote ${vscodeSettingsPath.toAbsolutePath} -- pins the VS Code extension's scalino-lsp binary to $lspBinaryPath")
+    else
+      println(s"scalino: ${vscodeSettingsPath.toAbsolutePath} already exists -- leaving it alone; add this to pin the LSP binary if needed:")
+      println(s"""  "scalino-lsp.path": ${jsonStr(lspBinaryPath)}""")
 
   def main(args: Array[String]): Unit =
     if args.isEmpty then { printUsage(System.err); sys.exit(1) }
