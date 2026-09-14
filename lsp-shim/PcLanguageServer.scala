@@ -65,7 +65,9 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
 
     val warmup = new Thread(() => {
       try {
+        System.err.println("PC warmup: thread running"); System.err.flush()
         val configs = loadConfig(rootUri)
+        System.err.println(s"PC warmup: config loaded, ${configs.size} project(s)"); System.err.flush()
         val classpath: Seq[Path] =
           configs.flatMap(c => c.classDirectory +: c.dependencyClasspath).distinct.map(Paths.get(_))
         val sourceDirs: Seq[Path] =
@@ -76,16 +78,24 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
         // its own `config.compilerArguments` usage).
         val compilerArgs: List[String] =
           configs.flatMap(_.compilerArguments).distinct
+        System.err.println(s"PC warmup: about to construct PC, classpath=${classpath.size} entries, sourceDirs=${sourceDirs.size}"); System.err.flush()
+        val built = RawScalaPresentationCompiler(
+          buildTargetIdentifier = "scalino",
+          classpath = classpath,
+          options = compilerArgs,
+          sourcePath = () => sourceDirs.asJava
+        )
+        System.err.println("PC warmup: PC constructed"); System.err.flush()
         thisServer.synchronized {
-          pc = RawScalaPresentationCompiler(
-            buildTargetIdentifier = "scalino",
-            classpath = classpath,
-            options = compilerArgs,
-            sourcePath = () => sourceDirs.asJava
-          )
+          pc = built
+          thisServer.notifyAll()
         }
+        System.err.println("PC warmup: done, notified"); System.err.flush()
       } catch {
-        case scala.util.control.NonFatal(ex) => ex.printStackTrace()
+        case ex: Throwable =>
+          System.err.println(s"PC warmup failed: ${ex.getClass.getName}: ${ex.getMessage}")
+          ex.printStackTrace()
+          System.err.flush()
       }
     })
     warmup.setDaemon(true)
@@ -94,7 +104,16 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
     InitializeResult(capabilities)
   }
 
+  /** Warmup (classpath resolution + PC construction) runs on a daemon thread
+   *  started from `initialize()` -- requests that land before it finishes
+   *  (e.g. an editor's first definition request right after startup) block
+   *  here instead of failing outright. 30s was too tight: observed real PC
+   *  warmup (classpath scanning over ~20+ real jars) taking anywhere from
+   *  ~1s (warm page cache) to several minutes (cold). */
   private def requirePc(): RawScalaPresentationCompiler = thisServer.synchronized {
+    val deadline = System.currentTimeMillis() + 180000
+    while (pc == null && System.currentTimeMillis() < deadline)
+      thisServer.wait(deadline - System.currentTimeMillis())
     if (pc == null) throw new IllegalStateException("presentation compiler not yet initialized")
     pc
   }
