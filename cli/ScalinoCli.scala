@@ -1350,8 +1350,13 @@ object ScalinoCli:
         val removedNames = removed.values.flatMap(_.declaredNames).toSet
         val allKnownNames = nameToFile.keySet ++ removedNames
 
+        // Single pass over each text, tokenizing into identifiers once,
+        // then intersecting against the known-names set -- avoids
+        // recompiling/rescanning with one regex per known name (was
+        // O(files * names * textLen), now O(files * textLen)).
+        val identifierRe = "[A-Za-z_][A-Za-z0-9_]*".r
         def usedNames(text: String): Set[String] =
-          allKnownNames.filter(n => ("\\b" + java.util.regex.Pattern.quote(n) + "\\b").r.findFirstIn(text).isDefined)
+          identifierRe.findAllMatchIn(text).map(_.matched).toSet.intersect(allKnownNames)
         val usedBy = texts.view.mapValues(usedNames).toMap
         def dependentsOf(n: String): Iterable[String] = usedBy.collect { case (p, used) if used(n) => p }
 
