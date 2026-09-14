@@ -66,7 +66,23 @@ for artifact in "${NIR_NATIVE_JARS[@]}"; do
 done
 
 PLUGIN_JAR="$(cat "$WORK/nscplugin.jar.txt")"
-COMPILE_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/nativelibs.cp")$CP_SEP$NIR_NATIVE_CP"
+
+# Substitute the published javalib_native0.5_3 jar for the locally-built one
+# with any patches/scala-native-000* actually applied -- see
+# build/01b-build-patched-javalib.sh and 03-build-scalino-dotc.sh's identical
+# substitution. Without this, scalino itself (not just scalino-dotc) links
+# against the unpatched upstream javalib.
+NATIVELIBS_CP="$WORK/scalino-src/nativelibs.cp"
+LOCAL_JAVALIB_JAR="$HOME/.ivy2/local/org.scala-native/javalib_native0.5_3/${SCALA_NATIVE_VERSION}-SNAPSHOT/jars/javalib_native0.5_3.jar"
+if [[ -f "$LOCAL_JAVALIB_JAR" ]]; then
+  { tr "$CP_SEP" '\n' < "$WORK/nativelibs.cp" | grep -v '/javalib_native0\.5_3-'; echo "$LOCAL_JAVALIB_JAR"; } | paste -sd"$CP_SEP" - > "$NATIVELIBS_CP"
+  echo "  using locally-built, patched javalib jar: $LOCAL_JAVALIB_JAR"
+else
+  cp "$WORK/nativelibs.cp" "$NATIVELIBS_CP"
+  echo "  WARNING: locally-built javalib jar not found ($LOCAL_JAVALIB_JAR) -- run build/01b-build-patched-javalib.sh first, or scala-native patches will NOT take effect in scalino itself."
+fi
+
+COMPILE_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$NATIVELIBS_CP")$CP_SEP$NIR_NATIVE_CP"
 
 "$DIST/scalino-dotc" \
   -javabootclasspath "$DIST/java.base.jar" \
@@ -76,7 +92,7 @@ COMPILE_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/nativelibs.cp")$CP_SEP
   -d "$CLASSES_DIR" \
   "$ROOT/cli/ScalinoCli.scala" "$SRC_DIR/BuildInfo.scala" "$SELFEXE"
 
-LINK_CP="$(to_native_path "$CLASSES_DIR")$CP_SEP$(cat "$WORK/nativelibs.cp")$CP_SEP$NIR_NATIVE_CP"
+LINK_CP="$(to_native_path "$CLASSES_DIR")$CP_SEP$(cat "$NATIVELIBS_CP")$CP_SEP$NIR_NATIVE_CP"
 # --mode release-size: v0.0.1 shipped scala-native's *default* Mode (debug --
 # no --mode flag was passed at all). -Xss64m defensively -- see
 # 03-build-scalino-dotc.sh's identical note (release-fast/-size's own
