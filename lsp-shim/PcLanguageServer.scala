@@ -38,6 +38,21 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
   private var pc: RawScalaPresentationCompiler = null
   private val buffers: mutable.Map[URI, String] = mutable.Map.empty
 
+  /** `didChange` used to recompile+publish synchronously on every keystroke:
+   *  typing a few chars queued up that many full compiles behind the LSP's
+   *  single lock, so diagnostics shown mid-burst lagged several keystrokes
+   *  behind (stale errors for seconds after the fix was already typed), even
+   *  though any *individual* compile is fast. Debounce so only the text from
+   *  the last edit in a burst gets compiled. */
+  private val diagnosticsDebounceMillis = 250L
+  private val diagnosticsScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r => {
+    val t = new Thread(r, "pc-diagnostics-debounce")
+    t.setDaemon(true)
+    t
+  })
+  private val bufferVersions: mutable.Map[URI, Long] = mutable.Map.empty
+  private val pendingDiagnostics: mutable.Map[URI, java.util.concurrent.ScheduledFuture[?]] = mutable.Map.empty
+
   /** Same on-disk config the old `DottyLanguageServer` backend used to read
    *  (`scalino setup-ide`'s output). */
   private def loadConfig(rootUri: String): List[ProjectConfig] = {
@@ -176,7 +191,16 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
     val change = params.contentChanges.head
     assert(change.range.isEmpty, "TextDocumentSyncKind.Incremental support is not implemented")
     buffers(uri) = change.text
-    publishDiagnosticsFor(uri, document.uri)
+    val version = bufferVersions.getOrElse(uri, 0L) + 1
+    bufferVersions(uri) = version
+    pendingDiagnostics.remove(uri).foreach(_.cancel(false))
+    val task: Runnable = () => thisServer.synchronized {
+      // Drop this compile if a newer edit landed while we were waiting --
+      // that edit's own scheduled task will publish for the latest text.
+      if (bufferVersions.get(uri).contains(version)) publishDiagnosticsFor(uri, document.uri)
+    }
+    pendingDiagnostics(uri) =
+      diagnosticsScheduler.schedule(task, diagnosticsDebounceMillis, java.util.concurrent.TimeUnit.MILLISECONDS)
   }
 
   private def publishDiagnosticsFor(uri: URI, uriString: String): Unit = {
@@ -191,6 +215,8 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
   def didClose(params: DidCloseTextDocumentParams): Unit = thisServer.synchronized {
     val uri = new URI(params.textDocument.uri)
     buffers.remove(uri)
+    bufferVersions.remove(uri)
+    pendingDiagnostics.remove(uri).foreach(_.cancel(false))
     requirePc().didClose(uri)
   }
 
@@ -205,7 +231,19 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
           kind = Option(item.getKind()).map(_.getValue()),
           detail = Option(item.getDetail()),
           documentation = Option(item.getDocumentation()).map(eitherToMarkupContent),
-          deprecated = Option(item.getDeprecated()).exists(_.booleanValue)
+          deprecated = Option(item.getDeprecated()).exists(_.booleanValue),
+          sortText = Option(item.getSortText()),
+          filterText = Option(item.getFilterText()),
+          insertText = Option(item.getInsertText()),
+          insertTextFormat = Option(item.getInsertTextFormat()).map(_.getValue()),
+          textEdit = Option(item.getTextEdit()).map { either =>
+            if (either.isLeft()) toTextEdit(either.getLeft())
+            else {
+              val ire = either.getRight()
+              TextEdit(toRange(ire.getInsert()), ire.getNewText())
+            }
+          },
+          additionalTextEdits = Option(item.getAdditionalTextEdits()).map(_.asScala.map(toTextEdit).toList).getOrElse(Nil)
         )
       }.toList
     )
