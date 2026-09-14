@@ -1331,7 +1331,7 @@ object ScalinoCli:
 
     val fullRebuild = !incremental || prev.isEmpty || prev.exists(_.fingerprint != fingerprint) || !Files.isDirectory(classesDir)
 
-    val (toCompile, removedRecords): (List[Path], List[(String, FileRecord)]) =
+    val (toCompile, removedRecords) =
       if fullRebuild then (sources, Nil)
       else
         val m = prev.get
@@ -1804,9 +1804,6 @@ object ScalinoCli:
     val allExpanded = expandSources(o.sources)
     if allExpanded.isEmpty then die("no .scala files found")
     val (expanded, testSources) = partitionSources(allExpanded)
-    if testSources.nonEmpty then
-      System.err.println(s"scalino: excluding ${testSources.length} test source(s) under test/ from `$mode` (test scope isn't run yet)")
-    if expanded.isEmpty then die("no main-scope .scala files found (only test sources under test/)")
 
     if o.watch then
       val watchPaths = expanded ++ expandWatchPaths(o.cliWatchingPaths.map(Paths.get(_)))
@@ -1921,8 +1918,6 @@ object ScalinoCli:
     val allExpanded = expandSources(o.sources)
     if allExpanded.isEmpty then die("no .scala files found")
     val (expanded, testSources) = partitionSources(allExpanded)
-    if testSources.nonEmpty then
-      System.err.println(s"scalino: excluding ${testSources.length} test source(s) under test/ from IDE config (test scope isn't run yet)")
     if expanded.isEmpty then die("no main-scope .scala files found (only test sources under test/)")
 
     val directives = parseDirectives(expanded)
