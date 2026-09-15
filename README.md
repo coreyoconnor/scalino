@@ -103,15 +103,17 @@ was bootstrapped from:
 
 ## Editor support
 
-`dist/scalino-lsp` gives editors like Zed and VS Code Scala diagnostics,
-hover, go-to-definition, references, and rename — without Metals' JVM
-dependency. Run `scalino setup-ide <sources...>` to generate its project
-config (`.scalino-build/scalino-lsp.json`).
+`dist/scalino-lsp` gives editors like Zed, VS Code, and Neovim Scala
+diagnostics, hover, go-to-definition, references, and rename — without
+Metals' JVM dependency. Run `scalino setup-ide <sources...>` to generate its
+project config (`.scalino-build/scalino-lsp.json`).
 
 For Zed, [`zed-extension/`](zed-extension/) wires it up as a real
 extension, published to Zed's gallery as "Scalino LSP". For VS Code,
 [`vscode-extension/`](vscode-extension/) does the same, packaged locally
-for now (not yet on the Marketplace) — see each directory's README for
+for now (not yet on the Marketplace). For Neovim,
+[`neovim-extension/`](neovim-extension/) provides a `vim.lsp` client config
+instead (no packaged plugin needed) — see each directory's README for
 install steps.
 
 ## Status
