@@ -2,10 +2,11 @@
 // dist/scalino-dotc + dist/scalino-linkdriver (see build/07-build-scalino.sh) into
 // a standalone Scala Native binary. No JVM anywhere in this tool or in
 // anything it invokes: it drives dist/scalino-dotc and dist/scalino-linkdriver
-// directly, and shells out to `cs` for dependency resolution -- coursier's
-// own official launcher is itself a prebuilt GraalVM native-image binary, so
-// that costs no JVM either. See docs/findings.md "Toward a build-tool
-// experience without a JVM".
+// directly, and shells out to dist/scalino-cs (coursier's own official `cs`
+// launcher, itself a prebuilt GraalVM native-image binary -- bundled and
+// renamed by build/06-package.sh so it never needs to be on the end user's
+// own PATH) for dependency resolution. See docs/findings.md "Toward a
+// build-tool experience without a JVM".
 //
 // Scope ("mini"): a single `//> using dep`/`//> using scala` directive
 // parser (one dep per line, no version constraints/exclusions), a
@@ -377,7 +378,7 @@ object ScalinoCli:
       cached match
         case Some(cp) => cp
         case None =>
-          val cs = findOnPath("cs")
+          val cs = s"$dist/scalino-cs"
           val coords = deps.map(toCoursierCoord) ::: alwaysIncludedArtifacts
           val excludeFlags = excludedArtifacts.flatMap(a => List("-E", a))
           val repoFlags = repositories.flatMap(r => List("-r", r))
@@ -407,7 +408,7 @@ object ScalinoCli:
         val key = sanitizeKey((deps.sorted ::: repositories.sorted).mkString(","))
         val marker = cacheDir.resolve(s"deps-$key.sources-fetched")
         if !Files.exists(marker) then
-          val cs = findOnPath("cs")
+          val cs = s"$dist/scalino-cs"
           val coords = deps.map(toCoursierCoord)
           val repoFlags = repositories.flatMap(r => List("-r", r))
           System.err.println(s"scalino: fetching sources for ${deps.mkString(", ")} (best-effort, for go-to-definition)")
@@ -437,7 +438,7 @@ object ScalinoCli:
       Files.createDirectories(libDir)
       val marker = libDir.resolve(s".stdlib-sources-fetched-${BuildInfo.scalaVersion}")
       if !Files.exists(marker) then
-        val cs = findOnPath("cs")
+        val cs = s"$dist/scalino-cs"
         val artifacts = List(
           ("org.scala-lang", "scala-library"),
           ("org.scala-lang", "scala3-library_3")

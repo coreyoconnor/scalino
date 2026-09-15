@@ -30,13 +30,14 @@ Prefer to do it by hand? Each release ships a self-contained `dist/` tarball
 [`docs/findings.md`](docs/findings.md)). Download, extract, run
 `scalino`/`dist/scalino`.
 
-You'll still need two small pre-existing binaries on the machine — neither is
-a JVM:
+You'll still need one small pre-existing binary on the machine — not a JVM:
 - **`clang`/`clang++`** — every build links through clang, even a
   zero-dependency Hello World. Already on macOS via Xcode Command Line
   Tools; `apt install clang` etc. elsewhere.
-- **[`cs`](https://get-coursier.io/)** — only needed if your project has
-  dependencies (`//> using dep`, `scalino setup-ide`).
+
+Dependency resolution (`//> using dep`, `scalino setup-ide`) needs no
+separate install — scalino bundles its own renamed copy of
+[coursier](https://get-coursier.io/)'s `cs` launcher (`scalino-cs`).
 
 ### Linux package managers
 

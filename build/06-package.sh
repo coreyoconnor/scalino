@@ -37,6 +37,18 @@ PLUGIN_BASE="$(basename "$PLUGIN_JAR")"
 cp -p "$PLUGIN_JAR" "$DIST/lib/$PLUGIN_BASE"
 echo "lib/$PLUGIN_BASE" > "$DIST/nscplugin.jar.txt"
 
+# Bundle coursier's `cs` launcher as scalino-cs, so `//> using dep`
+# resolution (cli/ScalinoCli.scala's resolveDeps/fetchSourcesBestEffort/
+# fetchStdlibSourcesBestEffort) never depends on the end user having `cs` on
+# their own PATH. Renamed so it can't collide with a user's own real `cs`.
+# `command -v cs` here is already the right binary for this machine: 00-env.sh
+# requires it on PATH at build time, and CI installs it per-target-OS/arch
+# (coursier/setup-action, native runners) before build/all.sh ever runs --
+# there's no cross-platform download/pin to manage, just copy what's already
+# resolved.
+cp "$(command -v cs)" "$DIST/scalino-cs"
+chmod +x "$DIST/scalino-cs"
+
 # Build-time-only intermediates (their classes are already baked into the
 # scalino-dotc/scalino-linkdriver binaries) -- not needed at runtime, drop them
 # so they don't end up in release tarballs.

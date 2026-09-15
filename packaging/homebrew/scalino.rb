@@ -36,12 +36,14 @@ class Scalino < Formula
   end
 
   depends_on "llvm" => :recommended # provides clang/clang++ where the OS doesn't already (Linux); macOS uses Xcode CLT's own
-  # coursier's `cs` launcher is optional -- only needed for `//> using dep`.
+  # coursier's `cs` launcher (needed for `//> using dep`) is bundled in the
+  # tarball as scalino-cs -- no separate dependency.
 
   def install
     libexec.install Dir["*"]
     bin.install_symlink libexec/"scalino"
     bin.install_symlink libexec/"scalino-lsp"
+    bin.install_symlink libexec/"scalino-cs"
   end
 
   test do

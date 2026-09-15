@@ -11,12 +11,14 @@
 # per-project config. Both resolve their own dist root from their real
 # (symlink-resolved) path at runtime -- see cli/selfexe/*.scala -- so a
 # symlink here is safe and the rest of dist/ (scalino-dotc,
-# scalino-linkdriver, lib/) never needs to move.
+# scalino-linkdriver, scalino-cs, lib/) never needs to move.
 #
 # Still required on top of this, on the running machine (not bundled --
-# see docs/findings.md): `clang`/`clang++` (needed for every build, even a
-# zero-dependency Hello World) and, only if you use `//> using dep`,
-# coursier's `cs` launcher for dependency resolution.
+# see docs/findings.md): `clang`/`clang++`, needed for every build, even a
+# zero-dependency Hello World. Dependency resolution for `//> using dep`
+# is self-contained -- scalino bundles its own renamed copy of coursier's
+# `cs` launcher (dist/scalino-cs) so the real `cs`, if any, on the user's
+# own PATH is never touched.
 set -euo pipefail
 
 repo="lolgab/scalino"
@@ -96,6 +98,8 @@ ln -sf "$dest_dir/scalino" "$bin_dir/scalino"
 chmod +x "$dest_dir/scalino"
 ln -sf "$dest_dir/scalino-lsp" "$bin_dir/scalino-lsp"
 chmod +x "$dest_dir/scalino-lsp"
+ln -sf "$dest_dir/scalino-cs" "$bin_dir/scalino-cs"
+chmod +x "$dest_dir/scalino-cs"
 
 echo "install.sh: installed scalino $tag -> $bin_dir/scalino (dist: $dest_dir)"
 

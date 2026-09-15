@@ -10,10 +10,11 @@
 # its own real path, so the /usr/bin symlinks below are safe and the rest
 # of /usr/lib/scalino/ never needs to move):
 #   /usr/lib/scalino/{scalino,scalino-dotc,scalino-linkdriver,scalino-lsp,
-#                     java.base.jar,compiler.cp,nativelibs.cp,
+#                     scalino-cs,java.base.jar,compiler.cp,nativelibs.cp,
 #                     nscplugin.jar.txt,lib/,README.md,LICENSE,NOTICE}
 #   /usr/bin/scalino     -> /usr/lib/scalino/scalino     (symlink)
 #   /usr/bin/scalino-lsp -> /usr/lib/scalino/scalino-lsp (symlink)
+#   /usr/bin/scalino-cs  -> /usr/lib/scalino/scalino-cs  (symlink)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -42,6 +43,7 @@ cp README.md LICENSE NOTICE "$staging/$prefix/"
 
 ln -s "/$prefix/scalino" "$staging/usr/bin/scalino"
 ln -s "/$prefix/scalino-lsp" "$staging/usr/bin/scalino-lsp"
+ln -s "/$prefix/scalino-cs" "$staging/usr/bin/scalino-cs"
 
 mkdir -p assets
 

@@ -49,6 +49,7 @@
             cp -a . "$out/lib/scalino/"
             ln -s "$out/lib/scalino/scalino" "$out/bin/scalino"
             ln -s "$out/lib/scalino/scalino-lsp" "$out/bin/scalino-lsp"
+            ln -s "$out/lib/scalino/scalino-cs" "$out/bin/scalino-cs"
             runHook postInstall
           '';
 
