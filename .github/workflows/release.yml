@@ -12,6 +12,12 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -189,3 +195,31 @@ jobs:
             assets/*.deb.sha256
             assets/*.rpm
             assets/*.rpm.sha256
+
+  publish-repo:
+    name: Publish apt/dnf repo
+    needs: publish
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install repo-building tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gnupg dpkg-dev apt-utils createrepo-c rpm
+
+      - name: Build apt/dnf repo tree
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: ./build/11-build-apt-dnf-repo.sh site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - uses: actions/deploy-pages@v4
+        id: deployment
