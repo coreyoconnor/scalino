@@ -196,6 +196,37 @@ jobs:
             assets/*.rpm
             assets/*.rpm.sha256
 
+  update-package-metadata:
+    name: Update packaging metadata (homebrew/arch/nix)
+    needs: publish
+    runs-on: ubuntu-24.04
+    # Best-effort: build/10-update-package-metadata.sh curls all 4 platform
+    # tarballs from the release it just downloaded/uploaded. If one platform's
+    # build job failed above (they're continue-on-error, see the comment on
+    # the build job), that asset is missing from the release and this script
+    # fails fetching it -- a maintainer then reruns it locally once the
+    # missing platform is fixed. Must not block the release itself.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Update version+sha256 in PKGBUILD/sources.json/homebrew formula
+        run: ./build/10-update-package-metadata.sh "${{ inputs.tag || github.ref_name }}"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packaging/arch/PKGBUILD packaging/nix/sources.json packaging/homebrew/scalino.rb
+          if git diff --cached --quiet; then
+            echo "No packaging metadata changes -- skipping commit"
+            exit 0
+          fi
+          git commit -m "packaging: update metadata for ${{ inputs.tag || github.ref_name }}"
+          git push origin HEAD:main
+
   publish-repo:
     name: Publish apt/dnf repo
     needs: publish
