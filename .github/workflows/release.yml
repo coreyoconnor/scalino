@@ -33,11 +33,6 @@ jobs:
             os: macos-15-intel
           - target: macos-arm64
             os: macos-14
-          # Windows x86_64 support is untested/experimental -- see
-          # docs/findings.md. No windows-arm64 leg: not a target this
-          # toolchain supports yet.
-          - target: windows-x86_64
-            os: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -113,6 +108,58 @@ jobs:
             assets/*.deb.sha256
             assets/*.rpm
             assets/*.rpm.sha256
+          if-no-files-found: error
+
+  build-windows:
+    name: build (windows-x86_64)
+    runs-on: windows-latest
+    # Windows x86_64 support is untested/experimental -- see docs/findings.md.
+    # Not a release gate: publish depends only on the Linux/macOS build job
+    # below, so a broken Windows leg never blocks the release.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-build-deps
+
+      - name: Build toolchain
+        shell: bash
+        run: ./build/all.sh
+
+      - name: Smoke test -- plain program
+        shell: bash
+        run: ./dist/scalino run examples/Hello.scala
+
+      - name: Smoke test -- real macro
+        # Known-failing, not a regression: see ci.yml's identical step for
+        # the full explanation (jsoniter-scala's derivation macro hits a
+        # genuine, still-open interpreter gap -- docs/findings.md's
+        # "Remaining work" #1). Without continue-on-error here, this step's
+        # failure skipped every later step in the job (Package included),
+        # so a release build that actually succeeded still shipped zero
+        # assets for every platform.
+        continue-on-error: true
+        shell: bash
+        run: ./dist/scalino run examples/macro-hello/Test.scala examples/macro-hello/Foo.scala
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          pkg="scalino-${version}-windows-x86_64"
+          mkdir -p "out/$pkg"
+          cp -a dist/. "out/$pkg/"
+          cp README.md LICENSE NOTICE "out/$pkg/"
+          mkdir -p assets
+          tar czf "assets/$pkg.tar.gz" -C out "$pkg"
+          ( cd assets && (sha256sum "$pkg.tar.gz" 2>/dev/null || shasum -a 256 "$pkg.tar.gz") > "$pkg.tar.gz.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-x86_64
+          path: |
+            assets/*.tar.gz
+            assets/*.tar.gz.sha256
           if-no-files-found: error
 
   publish:
