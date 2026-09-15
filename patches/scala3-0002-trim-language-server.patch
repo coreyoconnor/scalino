@@ -16,7 +16,7 @@ new file mode 100644
 index 00000000..13f93fea
 --- /dev/null
 +++ b/language-server/src/dotty/tools/languageserver/Lsp.scala
-@@ -0,0 +1,931 @@
+@@ -0,0 +1,954 @@
 +package dotty.tools
 +package languageserver
 +
@@ -81,7 +81,19 @@ index 00000000..13f93fea
 +    signatureHelpProvider: SignatureHelpOptions)
 +  final case class InitializeResult(capabilities: ServerCapabilities)
 +
-+  final case class CompletionItem(label: String, kind: Option[Int], detail: Option[String], documentation: Option[MarkupContent], deprecated: Boolean)
++  final case class CompletionItem(
++    label: String,
++    kind: Option[Int],
++    detail: Option[String],
++    documentation: Option[MarkupContent],
++    deprecated: Boolean,
++    sortText: Option[String] = None,
++    filterText: Option[String] = None,
++    insertText: Option[String] = None,
++    insertTextFormat: Option[Int] = None,
++    textEdit: Option[TextEdit] = None,
++    additionalTextEdits: List[TextEdit] = Nil
++  )
 +  final case class CompletionList(isIncomplete: Boolean, items: List[CompletionItem])
 +  final case class TextEdit(range: Range, newText: String)
 +  final case class WorkspaceEdit(changes: Map[String, List[TextEdit]])
@@ -600,6 +612,17 @@ index 00000000..13f93fea
 +      x.detail match { case Some(d) => out.writeVal(d); case None => out.writeNull() }
 +      out.writeNonEscapedAsciiKey("documentation"); encodeOptionalMarkupContent(x.documentation, out)
 +      out.writeNonEscapedAsciiKey("deprecated"); out.writeVal(x.deprecated)
++      x.sortText.foreach { v => out.writeNonEscapedAsciiKey("sortText"); out.writeVal(v) }
++      x.filterText.foreach { v => out.writeNonEscapedAsciiKey("filterText"); out.writeVal(v) }
++      x.insertText.foreach { v => out.writeNonEscapedAsciiKey("insertText"); out.writeVal(v) }
++      x.insertTextFormat.foreach { v => out.writeNonEscapedAsciiKey("insertTextFormat"); out.writeVal(v) }
++      x.textEdit.foreach { v => out.writeNonEscapedAsciiKey("textEdit"); textEditCodec.encodeValue(v, out) }
++      if (x.additionalTextEdits.nonEmpty) {
++        out.writeNonEscapedAsciiKey("additionalTextEdits")
++        out.writeArrayStart()
++        x.additionalTextEdits.foreach(textEditCodec.encodeValue(_, out))
++        out.writeArrayEnd()
++      }
 +      out.writeObjectEnd()
 +    }
 +  }
