@@ -1745,6 +1745,10 @@ object ScalinoCli:
     // warnings/errors. -v wins if both are passed.
     def logLevel: String = if verbose then "verbose" else if quiet then "quiet" else "info"
 
+  /** No source args -> default to the current directory, scala-cli-alike. */
+  def defaultToCwd(o: RunOpts): RunOpts =
+    if o.sources.isEmpty then o.copy(sources = List(Paths.get("."))) else o
+
   def parseRunOpts(args: Array[String]): RunOpts =
     var o = RunOpts()
     var i = 0
@@ -1844,8 +1848,7 @@ object ScalinoCli:
         attempt()
 
   def handleRunOrCompile(mode: String, args: Array[String]): Unit =
-    val o = parseRunOpts(args)
-    if o.sources.isEmpty then die("no source files given")
+    val o = defaultToCwd(parseRunOpts(args))
     o.sources.find(!Files.exists(_)).foreach(p => die(s"no such file: $p"))
     val allExpanded = expandSources(o.sources)
     if allExpanded.isEmpty then die("no .scala files found")
@@ -1868,8 +1871,7 @@ object ScalinoCli:
    *  together (test sources depend on main scope) in one pass, so it
    *  doesn't call `partitionSources` at all. */
   def handleTest(args: Array[String]): Unit =
-    val o = parseRunOpts(args)
-    if o.sources.isEmpty then die("no source files given")
+    val o = defaultToCwd(parseRunOpts(args))
     o.sources.find(!Files.exists(_)).foreach(p => die(s"no such file: $p"))
     val expanded = expandSources(o.sources)
     if expanded.isEmpty then die("no .scala files found")
@@ -1958,8 +1960,7 @@ object ScalinoCli:
    *  classpath exactly (via computeCompileClasspath), so the IDE
    *  type-checks against the same inputs a real build would use. */
   def handleSetupIde(args: Array[String]): Unit =
-    val o = parseRunOpts(args)
-    if o.sources.isEmpty then die("no source files given")
+    val o = defaultToCwd(parseRunOpts(args))
     o.sources.find(!Files.exists(_)).foreach(p => die(s"no such file: $p"))
     val allExpanded = expandSources(o.sources)
     if allExpanded.isEmpty then die("no .scala files found")
