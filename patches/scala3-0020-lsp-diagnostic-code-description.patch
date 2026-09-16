@@ -1,0 +1,32 @@
+diff --git a/language-server/src/dotty/tools/languageserver/Lsp.scala b/language-server/src/dotty/tools/languageserver/Lsp.scala
+index a1435f2d..e9595a56 100644
+--- a/language-server/src/dotty/tools/languageserver/Lsp.scala
++++ b/language-server/src/dotty/tools/languageserver/Lsp.scala
+@@ -97,7 +97,13 @@ object Lsp {
+   final case class ParameterInformation(label: String, documentation: Option[MarkupContent])
+   final case class SignatureInformation(label: String, documentation: Option[MarkupContent], parameters: List[ParameterInformation])
+   final case class SignatureHelp(signatures: List[SignatureInformation], activeParameter: Int, activeSignature: Int)
+-  final case class Diagnostic(range: Range, message: String, severity: Int, source: String, code: String)
++  /** `codeDescription` is the LSP spec's `{ href: string }` shape -- a
++   *  client that supports it (e.g. VS Code) renders `code` as a clickable
++   *  link. `code` itself is dotc's own `E###` convention (matches dotc's
++   *  CLI output, e.g. `-- [E007] Type Mismatch Error:`) rather than a bare
++   *  number -- see `PcLanguageServer.formatDiagnosticCode`'s doc comment for
++   *  why a bare number was replaced. */
++  final case class Diagnostic(range: Range, message: String, severity: Int, source: String, code: String, codeDescription: Option[String])
+   final case class PublishDiagnosticsParams(uri: String, diagnostics: List[Diagnostic])
+   /** `window/showMessage`'s `type`: 1 = Error, 2 = Warning, 3 = Info, 4 = Log. */
+   final case class ShowMessageParams(`type`: Int, message: String)
+@@ -863,6 +869,12 @@ object Lsp {
+       out.writeNonEscapedAsciiKey("severity"); out.writeVal(x.severity)
+       out.writeNonEscapedAsciiKey("source"); out.writeVal(x.source)
+       out.writeNonEscapedAsciiKey("code"); out.writeVal(x.code)
++      x.codeDescription.foreach { href =>
++        out.writeNonEscapedAsciiKey("codeDescription")
++        out.writeObjectStart()
++        out.writeNonEscapedAsciiKey("href"); out.writeVal(href)
++        out.writeObjectEnd()
++      }
+       out.writeObjectEnd()
+     }
+   }

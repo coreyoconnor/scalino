@@ -214,11 +214,33 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
       diagnosticsScheduler.schedule(task, diagnosticsDebounceMillis, java.util.concurrent.TimeUnit.MILLISECONDS)
   }
 
+  /** dotc's raw diagnostic `code` is just `ErrorMessageID.errorNumber`'s bare
+   *  digits (e.g. "50") -- shown by VS Code as `source(code)`, i.e.
+   *  "presentation compiler(50)", which tells a user nothing on its own.
+   *  Reformat to dotc's own `E###` convention (matches dotc's CLI output,
+   *  e.g. `-- [E007] Type Mismatch Error:`) and, since every such ID has a
+   *  real published page at
+   *  https://docs.scala-lang.org/scala3/reference/error-codes/E###.html
+   *  (confirmed live for E050), attach it as `codeDescription` so a client
+   *  that supports it (VS Code does) renders the code as a clickable link
+   *  straight to the explanation. `-1` (`NoExplanationID`, real Metals'
+   *  own special case for "no doc page exists") and anything non-numeric
+   *  are left with no code/link at all rather than a broken one. */
+  private def formatDiagnosticCode(rawCode: String): Option[(String, String)] =
+    rawCode.toIntOption.filter(_ >= 0).map { n =>
+      val padded = "E%03d".format(n)
+      (padded, s"https://docs.scala-lang.org/scala3/reference/error-codes/$padded.html")
+    }
+
   private def publishDiagnosticsFor(uri: URI, uriString: String): Unit = {
     val diags = requirePc().didChange(CompilerVirtualFileParams(uri, textOf(uri)))
     val lspDiags = diags.asScala.map { d =>
       val severity = Option(d.getSeverity()).map(_.getValue()).getOrElse(1)
-      Diagnostic(toRange(d.getRange()), eitherToString(d.getMessage()), severity, Option(d.getSource()).getOrElse(""), Option(d.getCode()).map(eitherToString).getOrElse(""))
+      val (code, codeDescription) = Option(d.getCode()).map(eitherToString).flatMap(formatDiagnosticCode) match {
+        case Some((c, href)) => (c, Some(href))
+        case None => ("", None)
+      }
+      Diagnostic(toRange(d.getRange()), eitherToString(d.getMessage()), severity, Option(d.getSource()).getOrElse(""), code, codeDescription)
     }.toList
     publishDiagnostics(uriString, lspDiags)
   }
