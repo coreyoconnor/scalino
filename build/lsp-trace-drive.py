@@ -307,6 +307,53 @@ def main():
         show("workspace/symbol(Point)", resp, elapsed)
         ok = ok and resp is not None and 'error' not in resp
 
+        section("textDocument/typeDefinition(distance)")
+        resp, elapsed = client.request("textDocument/typeDefinition", {"textDocument": {"uri": main_uri}, "position": {"line": hover_line, "character": col}})
+        show("typeDefinition(distance)", resp, elapsed)
+        ok = ok and resp is not None and 'error' not in resp
+
+        section("textDocument/prepareRename(distance)")
+        resp, elapsed = client.request("textDocument/prepareRename", {"textDocument": {"uri": main_uri}, "position": {"line": hover_line, "character": col}})
+        show("prepareRename(distance)", resp, elapsed)
+        ok = ok and resp is not None and 'error' not in resp
+
+        section("textDocument/selectionRange(distance)")
+        resp, elapsed = client.request("textDocument/selectionRange", {"textDocument": {"uri": main_uri}, "positions": [{"line": hover_line, "character": col}]})
+        show("selectionRange(distance)", resp, elapsed)
+        ok = ok and resp is not None and 'error' not in resp
+        if resp is not None and 'error' not in resp:
+            print(f"  {len(resp['result'])} selection range(s) returned")
+
+        section("textDocument/inlayHint(Main.scala, full range)")
+        resp, elapsed = client.request("textDocument/inlayHint", {
+            "textDocument": {"uri": main_uri},
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": len(main_lines), "character": 0}},
+        })
+        show("inlayHint(Main.scala)", resp, elapsed)
+        ok = ok and resp is not None and 'error' not in resp
+        if resp is not None and 'error' not in resp:
+            print(f"  {len(resp['result'])} inlay hint(s) returned")
+
+        section("textDocument/semanticTokens/full(Main.scala)")
+        resp, elapsed = client.request("textDocument/semanticTokens/full", {"textDocument": {"uri": main_uri}})
+        show("semanticTokens(Main.scala)", resp, elapsed)
+        ok = ok and resp is not None and 'error' not in resp
+        if resp is not None and 'error' not in resp:
+            data = resp['result']['data']
+            print(f"  {len(data)} ints ({len(data)//5} tokens)")
+            ok = ok and len(data) > 0 and len(data) % 5 == 0
+
+        section("textDocument/codeAction(distance)")
+        resp, elapsed = client.request("textDocument/codeAction", {
+            "textDocument": {"uri": main_uri},
+            "range": {"start": {"line": hover_line, "character": col}, "end": {"line": hover_line, "character": col}},
+            "context": {"diagnostics": []},
+        })
+        show("codeAction(distance)", resp, elapsed)
+        ok = ok and resp is not None and 'error' not in resp
+        if resp is not None and 'error' not in resp:
+            print(f"  {len(resp['result'])} code action(s): {[a['title'] for a in resp['result']]}")
+
         section("didChange: introduce type error")
         client.notify("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 2}, "contentChanges": [{"text": main_text_broken}]})
         n, _ = client.drain_notifications(

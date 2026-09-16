@@ -1,0 +1,310 @@
+diff --git a/language-server/src/dotty/tools/languageserver/Lsp.scala b/language-server/src/dotty/tools/languageserver/Lsp.scala
+index 83c753e4..a1435f2d 100644
+--- a/language-server/src/dotty/tools/languageserver/Lsp.scala
++++ b/language-server/src/dotty/tools/languageserver/Lsp.scala
+@@ -43,11 +43,19 @@ object Lsp {
+   final case class RenameParams(textDocument: TextDocumentIdentifier, position: Position, newName: String)
+   final case class DocumentSymbolParams(textDocument: TextDocumentIdentifier)
+   final case class WorkspaceSymbolParams(query: String)
++  final case class SelectionRangeParams(textDocument: TextDocumentIdentifier, positions: List[Position])
++  final case class InlayHintParams(textDocument: TextDocumentIdentifier, range: Range)
++  /** `context.diagnostics`/`context.only` are real fields of the LSP request
++   *  this project doesn't act on (see `PcLanguageServer.codeAction`'s doc
++   *  comment) -- skipped like every other unmodeled key. */
++  final case class CodeActionParams(textDocument: TextDocumentIdentifier, range: Range)
+ 
+   // -- Outgoing (server -> client) result/notification payloads -----------
+ 
+   final case class CompletionOptions(triggerCharacters: List[String])
+   final case class SignatureHelpOptions(triggerCharacters: List[String])
++  final case class SemanticTokensLegend(tokenTypes: List[String], tokenModifiers: List[String])
++  final case class SemanticTokensOptions(legend: SemanticTokensLegend, full: Boolean)
+   final case class ServerCapabilities(
+     textDocumentSync: Int,
+     documentHighlightProvider: Boolean,
+@@ -59,7 +67,12 @@ object Lsp {
+     referencesProvider: Boolean,
+     implementationProvider: Boolean,
+     completionProvider: CompletionOptions,
+-    signatureHelpProvider: SignatureHelpOptions)
++    signatureHelpProvider: SignatureHelpOptions,
++    typeDefinitionProvider: Boolean,
++    selectionRangeProvider: Boolean,
++    inlayHintProvider: Boolean,
++    codeActionProvider: Boolean,
++    semanticTokensProvider: SemanticTokensOptions)
+   final case class InitializeResult(capabilities: ServerCapabilities)
+ 
+   final case class CompletionItem(
+@@ -88,6 +101,20 @@ object Lsp {
+   final case class PublishDiagnosticsParams(uri: String, diagnostics: List[Diagnostic])
+   /** `window/showMessage`'s `type`: 1 = Error, 2 = Warning, 3 = Info, 4 = Log. */
+   final case class ShowMessageParams(`type`: Int, message: String)
++  final case class SelectionRange(range: Range, parent: Option[SelectionRange])
++  final case class InlayHint(
++    position: Position,
++    label: String,
++    kind: Option[Int],
++    paddingLeft: Option[Boolean],
++    paddingRight: Option[Boolean],
++    tooltip: Option[String])
++  /** `textDocument/semanticTokens/full`'s result: `data` is the LSP spec's
++   *  flat, relative-encoded `(deltaLine, deltaStartChar, length, tokenType,
++   *  tokenModifiersBitmask)` quintuple array -- see
++   *  `PcLanguageServer.semanticTokens`'s doc comment for the encoding. */
++  final case class SemanticTokens(data: List[Int])
++  final case class CodeAction(title: String, kind: String, edit: WorkspaceEdit)
+ 
+   // -- .dotty-ide.json (replaces config.ProjectConfig + Jackson) -----------
+ 
+@@ -528,6 +555,78 @@ object Lsp {
+     def encodeValue(x: WorkspaceSymbolParams, out: JsonWriter): Unit = ???
+   }
+ 
++  given selectionRangeParamsCodec: JsonValueCodec[SelectionRangeParams] = new JsonValueCodec[SelectionRangeParams] {
++    def nullValue: SelectionRangeParams = null
++    def decodeValue(in: JsonReader, default: SelectionRangeParams): SelectionRangeParams =
++      if (in.isNextToken('{')) {
++        var textDocument: TextDocumentIdentifier = null
++        var positions: List[Position] = Nil
++        if (!in.isNextToken('}')) {
++          in.rollbackToken()
++          var continue = true
++          while (continue) {
++            in.readKeyAsString() match {
++              case "textDocument" => textDocument = textDocumentIdentifierCodec.decodeValue(in, null)
++              case "positions" => positions = decodeList(in, positionCodec)
++              case _ => skipVal(in)
++            }
++            continue = in.isNextToken(',')
++          }
++          if (!in.isCurrentToken('}')) in.objectEndOrCommaError()
++        }
++        SelectionRangeParams(textDocument, positions)
++      } else in.readNullOrTokenError(default, '{')
++    def encodeValue(x: SelectionRangeParams, out: JsonWriter): Unit = ???
++  }
++
++  given inlayHintParamsCodec: JsonValueCodec[InlayHintParams] = new JsonValueCodec[InlayHintParams] {
++    def nullValue: InlayHintParams = null
++    def decodeValue(in: JsonReader, default: InlayHintParams): InlayHintParams =
++      if (in.isNextToken('{')) {
++        var textDocument: TextDocumentIdentifier = null
++        var range: Range = null
++        if (!in.isNextToken('}')) {
++          in.rollbackToken()
++          var continue = true
++          while (continue) {
++            in.readKeyAsString() match {
++              case "textDocument" => textDocument = textDocumentIdentifierCodec.decodeValue(in, null)
++              case "range" => range = rangeCodec.decodeValue(in, null)
++              case _ => skipVal(in)
++            }
++            continue = in.isNextToken(',')
++          }
++          if (!in.isCurrentToken('}')) in.objectEndOrCommaError()
++        }
++        InlayHintParams(textDocument, range)
++      } else in.readNullOrTokenError(default, '{')
++    def encodeValue(x: InlayHintParams, out: JsonWriter): Unit = ???
++  }
++
++  given codeActionParamsCodec: JsonValueCodec[CodeActionParams] = new JsonValueCodec[CodeActionParams] {
++    def nullValue: CodeActionParams = null
++    def decodeValue(in: JsonReader, default: CodeActionParams): CodeActionParams =
++      if (in.isNextToken('{')) {
++        var textDocument: TextDocumentIdentifier = null
++        var range: Range = null
++        if (!in.isNextToken('}')) {
++          in.rollbackToken()
++          var continue = true
++          while (continue) {
++            in.readKeyAsString() match {
++              case "textDocument" => textDocument = textDocumentIdentifierCodec.decodeValue(in, null)
++              case "range" => range = rangeCodec.decodeValue(in, null)
++              case _ => skipVal(in) // "context" (diagnostics/only/triggerKind) unmodeled, see doc comment above
++            }
++            continue = in.isNextToken(',')
++          }
++          if (!in.isCurrentToken('}')) in.objectEndOrCommaError()
++        }
++        CodeActionParams(textDocument, range)
++      } else in.readNullOrTokenError(default, '{')
++    def encodeValue(x: CodeActionParams, out: JsonWriter): Unit = ???
++  }
++
+   // -- Outgoing codecs (encode only) ---------------------------------------
+ 
+   given completionOptionsCodec: JsonValueCodec[CompletionOptions] = new JsonValueCodec[CompletionOptions] {
+@@ -551,6 +650,28 @@ object Lsp {
+     }
+   }
+ 
++  given semanticTokensLegendCodec: JsonValueCodec[SemanticTokensLegend] = new JsonValueCodec[SemanticTokensLegend] {
++    def nullValue: SemanticTokensLegend = null
++    def decodeValue(in: JsonReader, default: SemanticTokensLegend): SemanticTokensLegend = ???
++    def encodeValue(x: SemanticTokensLegend, out: JsonWriter): Unit = {
++      out.writeObjectStart()
++      out.writeNonEscapedAsciiKey("tokenTypes"); encodeStringList(x.tokenTypes, out)
++      out.writeNonEscapedAsciiKey("tokenModifiers"); encodeStringList(x.tokenModifiers, out)
++      out.writeObjectEnd()
++    }
++  }
++
++  given semanticTokensOptionsCodec: JsonValueCodec[SemanticTokensOptions] = new JsonValueCodec[SemanticTokensOptions] {
++    def nullValue: SemanticTokensOptions = null
++    def decodeValue(in: JsonReader, default: SemanticTokensOptions): SemanticTokensOptions = ???
++    def encodeValue(x: SemanticTokensOptions, out: JsonWriter): Unit = {
++      out.writeObjectStart()
++      out.writeNonEscapedAsciiKey("legend"); semanticTokensLegendCodec.encodeValue(x.legend, out)
++      out.writeNonEscapedAsciiKey("full"); out.writeVal(x.full)
++      out.writeObjectEnd()
++    }
++  }
++
+   given serverCapabilitiesCodec: JsonValueCodec[ServerCapabilities] = new JsonValueCodec[ServerCapabilities] {
+     def nullValue: ServerCapabilities = null
+     def decodeValue(in: JsonReader, default: ServerCapabilities): ServerCapabilities = ???
+@@ -567,6 +688,11 @@ object Lsp {
+       out.writeNonEscapedAsciiKey("implementationProvider"); out.writeVal(x.implementationProvider)
+       out.writeNonEscapedAsciiKey("completionProvider"); completionOptionsCodec.encodeValue(x.completionProvider, out)
+       out.writeNonEscapedAsciiKey("signatureHelpProvider"); signatureHelpOptionsCodec.encodeValue(x.signatureHelpProvider, out)
++      out.writeNonEscapedAsciiKey("typeDefinitionProvider"); out.writeVal(x.typeDefinitionProvider)
++      out.writeNonEscapedAsciiKey("selectionRangeProvider"); out.writeVal(x.selectionRangeProvider)
++      out.writeNonEscapedAsciiKey("inlayHintProvider"); out.writeVal(x.inlayHintProvider)
++      out.writeNonEscapedAsciiKey("codeActionProvider"); out.writeVal(x.codeActionProvider)
++      out.writeNonEscapedAsciiKey("semanticTokensProvider"); semanticTokensOptionsCodec.encodeValue(x.semanticTokensProvider, out)
+       out.writeObjectEnd()
+     }
+   }
+@@ -766,6 +892,61 @@ object Lsp {
+     }
+   }
+ 
++  given selectionRangeCodec: JsonValueCodec[SelectionRange] = new JsonValueCodec[SelectionRange] {
++    def nullValue: SelectionRange = null
++    def decodeValue(in: JsonReader, default: SelectionRange): SelectionRange = ???
++    def encodeValue(x: SelectionRange, out: JsonWriter): Unit = {
++      out.writeObjectStart()
++      out.writeNonEscapedAsciiKey("range"); rangeCodec.encodeValue(x.range, out)
++      out.writeNonEscapedAsciiKey("parent")
++      x.parent match {
++        case Some(p) => selectionRangeCodec.encodeValue(p, out)
++        case None => out.writeNull()
++      }
++      out.writeObjectEnd()
++    }
++  }
++
++  given inlayHintCodec: JsonValueCodec[InlayHint] = new JsonValueCodec[InlayHint] {
++    def nullValue: InlayHint = null
++    def decodeValue(in: JsonReader, default: InlayHint): InlayHint = ???
++    def encodeValue(x: InlayHint, out: JsonWriter): Unit = {
++      out.writeObjectStart()
++      out.writeNonEscapedAsciiKey("position"); positionCodec.encodeValue(x.position, out)
++      out.writeNonEscapedAsciiKey("label"); out.writeVal(x.label)
++      x.kind.foreach { v => out.writeNonEscapedAsciiKey("kind"); out.writeVal(v) }
++      x.paddingLeft.foreach { v => out.writeNonEscapedAsciiKey("paddingLeft"); out.writeVal(v) }
++      x.paddingRight.foreach { v => out.writeNonEscapedAsciiKey("paddingRight"); out.writeVal(v) }
++      x.tooltip.foreach { v => out.writeNonEscapedAsciiKey("tooltip"); out.writeVal(v) }
++      out.writeObjectEnd()
++    }
++  }
++
++  given semanticTokensCodec: JsonValueCodec[SemanticTokens] = new JsonValueCodec[SemanticTokens] {
++    def nullValue: SemanticTokens = null
++    def decodeValue(in: JsonReader, default: SemanticTokens): SemanticTokens = ???
++    def encodeValue(x: SemanticTokens, out: JsonWriter): Unit = {
++      out.writeObjectStart()
++      out.writeNonEscapedAsciiKey("data")
++      out.writeArrayStart()
++      x.data.foreach(out.writeVal(_))
++      out.writeArrayEnd()
++      out.writeObjectEnd()
++    }
++  }
++
++  given codeActionCodec: JsonValueCodec[CodeAction] = new JsonValueCodec[CodeAction] {
++    def nullValue: CodeAction = null
++    def decodeValue(in: JsonReader, default: CodeAction): CodeAction = ???
++    def encodeValue(x: CodeAction, out: JsonWriter): Unit = {
++      out.writeObjectStart()
++      out.writeNonEscapedAsciiKey("title"); out.writeVal(x.title)
++      out.writeNonEscapedAsciiKey("kind"); out.writeVal(x.kind)
++      out.writeNonEscapedAsciiKey("edit"); workspaceEditCodec.encodeValue(x.edit, out)
++      out.writeObjectEnd()
++    }
++  }
++
+   // -- Locations/SymbolInformation lists carry their own top-level codec
+   //    (used directly as a request's whole `result`) --------------------
+ 
+@@ -799,6 +980,36 @@ object Lsp {
+     }
+   }
+ 
++  given selectionRangeListCodec: JsonValueCodec[List[SelectionRange]] = new JsonValueCodec[List[SelectionRange]] {
++    def nullValue: List[SelectionRange] = null
++    def decodeValue(in: JsonReader, default: List[SelectionRange]): List[SelectionRange] = ???
++    def encodeValue(x: List[SelectionRange], out: JsonWriter): Unit = {
++      out.writeArrayStart()
++      x.foreach(selectionRangeCodec.encodeValue(_, out))
++      out.writeArrayEnd()
++    }
++  }
++
++  given inlayHintListCodec: JsonValueCodec[List[InlayHint]] = new JsonValueCodec[List[InlayHint]] {
++    def nullValue: List[InlayHint] = null
++    def decodeValue(in: JsonReader, default: List[InlayHint]): List[InlayHint] = ???
++    def encodeValue(x: List[InlayHint], out: JsonWriter): Unit = {
++      out.writeArrayStart()
++      x.foreach(inlayHintCodec.encodeValue(_, out))
++      out.writeArrayEnd()
++    }
++  }
++
++  given codeActionListCodec: JsonValueCodec[List[CodeAction]] = new JsonValueCodec[List[CodeAction]] {
++    def nullValue: List[CodeAction] = null
++    def decodeValue(in: JsonReader, default: List[CodeAction]): List[CodeAction] = ???
++    def encodeValue(x: List[CodeAction], out: JsonWriter): Unit = {
++      out.writeArrayStart()
++      x.foreach(codeActionCodec.encodeValue(_, out))
++      out.writeArrayEnd()
++    }
++  }
++
+   private def encodeStringList(xs: List[String], out: JsonWriter): Unit = {
+     out.writeArrayStart()
+     xs.foreach(out.writeVal(_))
+diff --git a/language-server/src/dotty/tools/languageserver/Main.scala b/language-server/src/dotty/tools/languageserver/Main.scala
+index 2add0c01..a1550950 100644
+--- a/language-server/src/dotty/tools/languageserver/Main.scala
++++ b/language-server/src/dotty/tools/languageserver/Main.scala
+@@ -160,6 +160,27 @@ object Main {
+           case "textDocument/signatureHelp" =>
+             val params = readFromArray(env.paramsRaw)(using textDocumentPositionParamsCodec)
+             sendResult(env.idRaw, writeToArray(server.signatureHelp(params)))
++          case "textDocument/typeDefinition" =>
++            val params = readFromArray(env.paramsRaw)(using textDocumentPositionParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.typeDefinition(params))(using locationListCodec))
++          case "textDocument/prepareRename" =>
++            val params = readFromArray(env.paramsRaw)(using textDocumentPositionParamsCodec)
++            server.prepareRename(params) match {
++              case Some(range) => sendResult(env.idRaw, writeToArray(range))
++              case None => sendResult(env.idRaw, "null".getBytes("UTF-8"))
++            }
++          case "textDocument/selectionRange" =>
++            val params = readFromArray(env.paramsRaw)(using selectionRangeParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.selectionRange(params))(using selectionRangeListCodec))
++          case "textDocument/inlayHint" =>
++            val params = readFromArray(env.paramsRaw)(using inlayHintParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.inlayHint(params))(using inlayHintListCodec))
++          case "textDocument/semanticTokens/full" =>
++            val params = readFromArray(env.paramsRaw)(using documentSymbolParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.semanticTokens(params)))
++          case "textDocument/codeAction" =>
++            val params = readFromArray(env.paramsRaw)(using codeActionParamsCodec)
++            sendResult(env.idRaw, writeToArray(server.codeAction(params))(using codeActionListCodec))
+           case "$/cancelRequest" => () // no cancellation support -- see docs/findings.md
+           case other =>
+             Log(s"<- $other UNSUPPORTED")

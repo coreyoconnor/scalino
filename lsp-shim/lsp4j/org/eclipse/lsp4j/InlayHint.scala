@@ -1,19 +1,24 @@
 package org.eclipse.lsp4j
 
 import java.util as ju
+import org.eclipse.lsp4j.jsonrpc.messages.Either
 
-// Real lsp4j 1.0.0 types the `label`/`tooltip` fields to
-// `Either<String, List<InlayHintLabelPart>>` / `Either<String, MarkupContent>`.
-// No call site anywhere in presentation-compiler or the ported mtags-shared
-// source needs the list/MarkupContent variant, so this shim only exposes the
-// plain-String convenience shape (mirrors the real jar's own `setLabel(String)`
-// / `setTooltip(String)` overloads without also needing to model `Either`).
+// Real lsp4j 1.0.0 types `label` as `Either<String, List<InlayHintLabelPart>>`
+// and `tooltip` as `Either<String, MarkupContent>`, each with 3 setter
+// overloads (Either/String/right-branch, same shape as `Diagnostic.code` and
+// `CompletionItem.textEdit`). Confirmed a real, exercised call site now:
+// `InlayHints.makeInlayHint` (mtags-shared) calls `hint.setLabel(label.asJava)`
+// with a real `java.util.List[InlayHintLabelPart]` (composite hover-linked
+// labels, e.g. inferred types built from multiple `LabelPart`s) -- an
+// earlier version of this shim assumed (wrongly) that no call site needed
+// this, because `PcLanguageServer.scala.inlayHint` wasn't wired up yet to
+// actually exercise this code path via the real linker's reachability scan.
 class InlayHint() {
   private var _position: Position = null
-  private var _label: String = null
+  private var _label: Either[String, ju.List[InlayHintLabelPart]] = null
   private var _kind: InlayHintKind = null
   private var _textEdits: ju.List[TextEdit] = null
-  private var _tooltip: String = null
+  private var _tooltip: Either[String, MarkupContent] = null
   private var _paddingLeft: java.lang.Boolean = null
   private var _paddingRight: java.lang.Boolean = null
   private var _data: Object = null
@@ -21,19 +26,21 @@ class InlayHint() {
   def this(position: Position, label: String) = {
     this()
     _position = position
-    _label = label
+    _label = Either.forLeft(label)
   }
 
   def getPosition(): Position = _position
   def setPosition(position: Position): Unit = _position = position
-  def getLabel(): String = _label
-  def setLabel(label: String): Unit = _label = label
+  def getLabel(): Either[String, ju.List[InlayHintLabelPart]] = _label
+  def setLabel(label: String): Unit = _label = if (label == null) null else Either.forLeft(label)
+  def setLabel(label: ju.List[InlayHintLabelPart]): Unit = _label = if (label == null) null else Either.forRight(label)
   def getKind(): InlayHintKind = _kind
   def setKind(kind: InlayHintKind): Unit = _kind = kind
   def getTextEdits(): ju.List[TextEdit] = _textEdits
   def setTextEdits(textEdits: ju.List[TextEdit]): Unit = _textEdits = textEdits
-  def getTooltip(): String = _tooltip
-  def setTooltip(tooltip: String): Unit = _tooltip = tooltip
+  def getTooltip(): Either[String, MarkupContent] = _tooltip
+  def setTooltip(tooltip: String): Unit = _tooltip = if (tooltip == null) null else Either.forLeft(tooltip)
+  def setTooltip(tooltip: MarkupContent): Unit = _tooltip = if (tooltip == null) null else Either.forRight(tooltip)
   def getPaddingLeft(): java.lang.Boolean = _paddingLeft
   def setPaddingLeft(paddingLeft: java.lang.Boolean): Unit = _paddingLeft = paddingLeft
   def getPaddingRight(): java.lang.Boolean = _paddingRight

@@ -9,11 +9,12 @@ import scala.jdk.CollectionConverters._
 import scala.jdk.OptionConverters._
 
 import dotty.tools.pc.RawScalaPresentationCompiler
-import scala.meta.internal.metals.{CompilerOffsetParams, CompilerVirtualFileParams}
-import scala.meta.internal.pc.PcReferencesRequest
-import scala.meta.pc.{OffsetParams, VirtualFileParams}
+import scala.meta.internal.metals.{CompilerInlayHintsParams, CompilerOffsetParams, CompilerRangeParams, CompilerVirtualFileParams}
+import scala.meta.internal.pc.{PcReferencesRequest, SemanticTokens => PcSemanticTokens}
+import scala.meta.pc.{CodeActionId, OffsetParams, VirtualFileParams}
 import org.eclipse.lsp4j.jsonrpc.messages.{Either => JEither}
 import org.eclipse.lsp4j as l
+import scala.util.control.NonFatal
 
 import com.github.plokhotnyuk.jsoniter_scala.core._
 import Lsp._
@@ -27,8 +28,9 @@ import Lsp.given
  *  mtags-shared types are satisfied by the in-tree shim at `lsp-shim/` (not
  *  real jars).
  *
- *  Scope: completion/hover/definition/references/rename/documentHighlight/
- *  signatureHelp + didOpen/didChange/didClose diagnostics.
+ *  Scope: completion/hover/definition/typeDefinition/references/rename/
+ *  prepareRename/documentHighlight/signatureHelp/selectionRange/inlayHint/
+ *  semanticTokens/codeAction + didOpen/didChange/didClose diagnostics.
  *  presentation-compiler has no documentSymbol/workspaceSymbol/implementation
  *  equivalent (those come from Metals' own BSP-driven indexer, not the PC
  *  itself) -- `Main.scala`'s dispatch just doesn't wire those methods.
@@ -76,7 +78,16 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
       referencesProvider = true,
       implementationProvider = false,
       completionProvider = CompletionOptions(triggerCharacters = List(".")),
-      signatureHelpProvider = SignatureHelpOptions(triggerCharacters = List("(")))
+      signatureHelpProvider = SignatureHelpOptions(triggerCharacters = List("(")),
+      typeDefinitionProvider = true,
+      selectionRangeProvider = true,
+      inlayHintProvider = true,
+      codeActionProvider = true,
+      semanticTokensProvider = SemanticTokensOptions(
+        legend = SemanticTokensLegend(
+          tokenTypes = PcSemanticTokens.TokenTypes,
+          tokenModifiers = PcSemanticTokens.TokenModifiers),
+        full = true))
 
     val warmup = new Thread(() => {
       try {
@@ -319,4 +330,146 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
   def documentSymbol(params: DocumentSymbolParams): List[SymbolInformation] = Nil
   def symbol(params: WorkspaceSymbolParams): List[SymbolInformation] = Nil
   def implementation(params: TextDocumentPositionParams): List[Location] = Nil
+
+  def typeDefinition(params: TextDocumentPositionParams): List[Location] = thisServer.synchronized {
+    val uri = new URI(params.textDocument.uri)
+    val result = requirePc().typeDefinition(offsetParams(uri, params.position))
+    result.locations().asScala.map(toLocation).toList
+  }
+
+  def prepareRename(params: TextDocumentPositionParams): Option[Range] = thisServer.synchronized {
+    val uri = new URI(params.textDocument.uri)
+    requirePc().prepareRename(offsetParams(uri, params.position)).toScala.map(toRange)
+  }
+
+  def selectionRange(params: SelectionRangeParams): List[Lsp.SelectionRange] = thisServer.synchronized {
+    val uri = new URI(params.textDocument.uri)
+    val offsets: List[OffsetParams] = params.positions.map(pos => offsetParams(uri, pos))
+    def convert(sr: l.SelectionRange): Lsp.SelectionRange =
+      Lsp.SelectionRange(toRange(sr.getRange()), Option(sr.getParent()).map(convert))
+    requirePc().selectionRange(offsets.asJava).asScala.map(convert).toList
+  }
+
+  def inlayHint(params: InlayHintParams): List[Lsp.InlayHint] = thisServer.synchronized {
+    val uri = new URI(params.textDocument.uri)
+    val text = textOf(uri)
+    val rangeParams = CompilerRangeParams(uri, text, positionToOffset(text, params.range.start), positionToOffset(text, params.range.end))
+    // Enable every hint kind PC supports -- there's no separate LSP-level
+    // per-kind toggle in this minimal client model (real Metals exposes these
+    // as user settings; this server always asks for everything and lets the
+    // editor's own inlay-hint UI settings decide what's actually shown).
+    val hintsParams = CompilerInlayHintsParams(
+      rangeParams,
+      inferredTypes = true,
+      typeParameters = true,
+      implicitParameters = true,
+      hintsXRayMode = false,
+      byNameParameters = true,
+      implicitConversions = true,
+      namedParameters = true,
+      hintsInPatternMatch = true,
+      closingLabels = false)
+    requirePc().inlayHints(hintsParams).asScala.map { h =>
+      val pos = h.getPosition()
+      // Real lsp4j 1.0.0 types `label` as `Either<String, List<InlayHintLabelPart>>` --
+      // presentation-compiler really does build the `List` shape for composite
+      // (e.g. multi-part inferred-type) hints (`InlayHints.makeInlayHint`,
+      // mtags-shared), so unlike the other Either-typed fields in this file
+      // (which PC only ever sets to `Left`), this one needs its Right branch
+      // handled for real: flatten each part's plain text -- this minimal wire
+      // model has no per-part hover-link shape to preserve, only a display
+      // string. `tooltip` is never actually set by any call site (confirmed
+      // via a full grep of presentation-compiler+mtags-shared), so
+      // `eitherToString`'s generic Left/Right handling is enough there.
+      val label = Option(h.getLabel()) match {
+        case None => ""
+        case Some(e) if e.isLeft() => e.getLeft()
+        case Some(e) => e.getRight().asScala.map(_.getValue()).mkString
+      }
+      Lsp.InlayHint(
+        position = Position(pos.getLine(), pos.getCharacter()),
+        label = label,
+        kind = Option(h.getKind()).map(_.getValue()),
+        paddingLeft = Option(h.getPaddingLeft()).map(_.booleanValue),
+        paddingRight = Option(h.getPaddingRight()).map(_.booleanValue),
+        tooltip = Option(h.getTooltip()).map(eitherToString))
+    }.toList
+  }
+
+  /** LSP's semantic-tokens wire format is a flat, *relative*-encoded array:
+   *  each token is 5 ints `(deltaLine, deltaStartChar, length, tokenType,
+   *  tokenModifiersBitmask)`, delta-encoded against the previous token's
+   *  start (`deltaStartChar` is relative to the previous token's start
+   *  column ONLY when on the same line, otherwise absolute) -- see the LSP
+   *  spec's "SemanticTokens" section. `RawScalaPresentationCompiler.Node`
+   *  gives raw text offsets, not line/character, so this does one forward
+   *  scan over the buffer converting each node's start offset to
+   *  line/character (nodes are sorted by position first since the encoding
+   *  requires monotonically increasing positions). */
+  def semanticTokens(params: DocumentSymbolParams): Lsp.SemanticTokens = thisServer.synchronized {
+    val uri = new URI(params.textDocument.uri)
+    val text = textOf(uri)
+    val nodes = requirePc().semanticTokens(CompilerVirtualFileParams(uri, text)).asScala.toList.sortBy(n => (n.start(), n.end()))
+    val data = List.newBuilder[Int]
+    var idx = 0
+    var line = 0
+    var col = 0
+    var prevLine = 0
+    var prevCol = 0
+    for (n <- nodes) {
+      while (idx < n.start()) {
+        if (text.charAt(idx) == '\n') { line += 1; col = 0 } else col += 1
+        idx += 1
+      }
+      val deltaLine = line - prevLine
+      val deltaCol = if (deltaLine == 0) col - prevCol else col
+      data += deltaLine
+      data += deltaCol
+      data += (n.end() - n.start())
+      data += n.tokenType()
+      data += n.tokenModifier()
+      prevLine = line
+      prevCol = col
+    }
+    Lsp.SemanticTokens(data.result())
+  }
+
+  /** Only the code actions presentation-compiler can compute from just a
+   *  cursor/selection (no extra user-chosen payload) are wired here --
+   *  `ConvertToNamedArguments`/`ConvertToNamedLambdaParameters` need a set of
+   *  argument indices the user picked, which this minimal client model has
+   *  no UI to collect, so they're deliberately left unwired rather than
+   *  guessed at (e.g. "convert all arguments", which wouldn't match what a
+   *  real editor's own argument-picking UI would send). Each provider is
+   *  tried independently and just contributes nothing if it doesn't apply at
+   *  this position -- there's no separate "is this applicable here" query on
+   *  `RawScalaPresentationCompiler`, only "try it and see what edits (if
+   *  any) come back", so a thrown exception is treated the same as an empty
+   *  result. */
+  def codeAction(params: CodeActionParams): List[Lsp.CodeAction] = thisServer.synchronized {
+    val uri = new URI(params.textDocument.uri)
+    val text = textOf(uri)
+    val startOffset = positionToOffset(text, params.range.start)
+    val endOffset = positionToOffset(text, params.range.end)
+    val cursorParams = CompilerOffsetParams(uri, text, startOffset)
+    val compiler = requirePc()
+
+    def tryEdits(id: String, target: OffsetParams, payload: java.util.Optional[OffsetParams] = java.util.Optional.empty()): List[TextEdit] =
+      try compiler.codeAction(target, id, payload).asScala.map(toTextEdit).toList
+      catch { case NonFatal(_) => Nil }
+
+    val actions = List.newBuilder[Lsp.CodeAction]
+    def addIfNonEmpty(title: String, kind: String, edits: List[TextEdit]): Unit =
+      if (edits.nonEmpty) actions += Lsp.CodeAction(title, kind, WorkspaceEdit(Map(params.textDocument.uri -> edits)))
+
+    addIfNonEmpty("Implement abstract members", "quickfix", tryEdits(CodeActionId.ImplementAbstractMembers, cursorParams))
+    addIfNonEmpty("Insert inferred type", "refactor.rewrite", tryEdits(CodeActionId.InsertInferredType, cursorParams))
+    addIfNonEmpty("Insert inferred method", "refactor.rewrite", tryEdits(CodeActionId.InsertInferredMethod, cursorParams))
+    addIfNonEmpty("Inline value", "refactor.inline", tryEdits(CodeActionId.InlineValue, cursorParams))
+    if (endOffset > startOffset) {
+      val rangeParams = CompilerRangeParams(uri, text, startOffset, endOffset)
+      addIfNonEmpty("Extract method", "refactor.extract", tryEdits(CodeActionId.ExtractMethod, rangeParams, java.util.Optional.of(cursorParams)))
+    }
+    actions.result()
+  }
 }
