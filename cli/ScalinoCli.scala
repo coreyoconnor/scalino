@@ -1588,12 +1588,6 @@ object ScalinoCli:
   //          -v/--verbose | -q/--quiet | -- <program args...>
   // ---------------------------------------------------------------------
 
-  private val unsupportedCommands = Set(
-    "fmt", "repl", "publish", "publish-local", "clean",
-    "bsp", "export", "doctor", "install-completions",
-    "dependency-update", "shebang"
-  )
-
   def printVersion(): Unit =
     println(s"scalino ${BuildInfo.scalinoVersion} -- Scala ${BuildInfo.scalaVersion}, Scala Native ${BuildInfo.nativeVersion}")
 
@@ -1706,8 +1700,6 @@ object ScalinoCli:
          |startup. Same command name as scala-cli's `setup-ide`, but a
          |different output file: this toolchain's LSP speaks that format
          |directly, no BSP layer needed.
-         |
-         |not implemented (this is a minimal scala-cli-alike): ${unsupportedCommands.toList.sorted.mkString(", ")}.
          |""".stripMargin
     )
 
@@ -2044,8 +2036,6 @@ object ScalinoCli:
       case "package" => handleRunOrCompile("package", args.drop(1))
       case "test" => handleTest(args.drop(1))
       case "setup-ide" => handleSetupIde(args.drop(1))
-      case cmd if unsupportedCommands(cmd) =>
-        die(s"'$cmd' is not implemented in this minimal scala-cli-alike -- supported: run, compile, package, test, setup-ide, version")
       case first if first.startsWith("-") || Files.exists(Paths.get(first)) =>
         handleRunOrCompile("run", args) // implicit `run`, e.g. `scalino Foo.scala`
       case other =>

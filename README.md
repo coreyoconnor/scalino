@@ -89,8 +89,7 @@ typecheck but have no native code to call into (see
 
 Unlike scala-cli, `scalino` only targets the one Scala/Scala Native version
 it was built for — no per-project version switching, no JVM/Scala.js
-targets — and commands it doesn't implement (`test`, `fmt`, `repl`,
-`package`, `publish`, `bsp`, `export`) print a clear "not implemented"
+targets — and commands it doesn't implement print a clear "not implemented"
 instead of guessing.
 
 There's also `bin/scalino-bootstrap`, the plain bash wrapper `scalino` itself
