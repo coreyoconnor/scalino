@@ -5,6 +5,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/versions.env"
 
+# scalino's own version isn't pinned in versions.env -- it's whatever tag
+# (or tag-relative description, for a dev build) the checked-out commit
+# actually is, so `scalino version` can never lag the last hand-edited
+# number the way it used to. release.yml always tags as vX.Y.Z, matching
+# build/10-update-package-metadata.sh's own "${tag#v}" convention.
+SCALINO_VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)"
+SCALINO_VERSION="${SCALINO_VERSION#v}"
+
 # On Windows OpenJDK's bin/ tools are .exe/.cmd, not extension-less -- and
 # unlike a bare `command -v name` (which the shell's own PATHEXT-style
 # lookup resolves), a full literal path like "$JAVA_HOME/bin/java" is
