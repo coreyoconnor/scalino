@@ -50,8 +50,97 @@ object ScalinoCli:
   // build/06-package.sh's vendor_cp), so this just has to match it.
   val CP_SEP: String = java.io.File.pathSeparator
 
+  // ---------------------------------------------------------------------
+  // Color output, cargo/scala-cli-style: on by default when the relevant
+  // stream is a real terminal, auto-disabled when it's redirected to a
+  // file/pipe (so scripted/CI usage and `scalino ... | tee log` both stay
+  // plain), and overridable either way via the same conventions cargo and
+  // scala-cli already both respect -- NO_COLOR (https://no-color.org: any
+  // non-empty value, unconditionally off), CLICOLOR_FORCE (BSD/cargo
+  // convention: force color even off a real terminal, e.g. piped into
+  // `less -R`), TERM=dumb, and an explicit `--color always|auto|never`
+  // flag (cargo's own spelling and values), which always wins over both
+  // env vars. `--color` is pulled out of argv once in `main`, before any
+  // subcommand-specific parsing ever sees it -- cargo accepts it anywhere
+  // on the line, not just as the first argument.
+  // ---------------------------------------------------------------------
+
+  enum ColorMode:
+    case Always, Never, Auto
+
+  private var colorMode: ColorMode = ColorMode.Auto
+
+  private def setColorMode(value: String): Unit =
+    colorMode = value match
+      case "always" => ColorMode.Always
+      case "never" => ColorMode.Never
+      case "auto" => ColorMode.Auto
+      case other => die(s"invalid --color value: '$other' (expected always, auto, or never)")
+
+  /** Strips a `--color always|auto|never` (or `--color=<value>`) out of
+   *  `args` wherever it appears and sets `colorMode` from it, returning
+   *  `args` with that flag removed so no subcommand's own option parser
+   *  ever has to know about it. A no-op (mode stays Auto) if absent. */
+  def extractColorFlag(args: Array[String]): Array[String] =
+    val eqIdx = args.indexWhere(_.startsWith("--color="))
+    if eqIdx >= 0 then
+      setColorMode(args(eqIdx).stripPrefix("--color="))
+      args.patch(eqIdx, Nil, 1)
+    else
+      val idx = args.indexOf("--color")
+      if idx < 0 then args
+      else
+        if idx + 1 >= args.length then die("--color requires a value: always, auto, or never")
+        setColorMode(args(idx + 1))
+        args.patch(idx, Nil, 2)
+
+  object Color:
+    private val RESET = "[0m"
+    private val BOLD = "[1m"
+    private val BOLD_RED = "[1;31m"
+    private val BOLD_GREEN = "[1;32m"
+    private val BOLD_YELLOW = "[1;33m"
+
+    /** Real `isatty(3)` on the given fd (1 = stdout, 2 = stderr) --
+     *  posixlib is already on this toolchain's own default native
+     *  classpath (dist/nativelibs.cp, see build/01-fetch-deps.sh), so this
+     *  links with no extra `//> using dep` anywhere. Defensive try/catch:
+     *  a failed color *decision* should never be why the CLI itself
+     *  crashes. */
+    private def isTty(fd: Int): Boolean =
+      try scala.scalanative.posix.unistd.isatty(fd) != 0
+      catch case _: Throwable => false
+
+    private def envSet(name: String): Boolean =
+      val v = System.getenv(name)
+      v != null && v.nonEmpty
+
+    def enabled(stream: java.io.PrintStream): Boolean =
+      colorMode match
+        case ColorMode.Always => true
+        case ColorMode.Never => false
+        case ColorMode.Auto =>
+          if envSet("NO_COLOR") then false
+          else if envSet("CLICOLOR_FORCE") && System.getenv("CLICOLOR_FORCE") != "0" then true
+          else if System.getenv("TERM") == "dumb" then false
+          else isTty(if stream eq System.err then 2 else 1)
+
+    private def paint(code: String, s: String, stream: java.io.PrintStream): String =
+      if enabled(stream) then s"$code$s$RESET" else s
+
+    /** Fatal errors (`die`, a caught `BuildFailed`) -- cargo's bold red. */
+    def error(s: String, stream: java.io.PrintStream = System.err): String = paint(BOLD_RED, s, stream)
+    /** Recoverable warnings (unsupported directive, scala-version mismatch). */
+    def warn(s: String, stream: java.io.PrintStream = System.err): String = paint(BOLD_YELLOW, s, stream)
+    /** Build/run progress and success ("resolving", "compiling", "wrote
+     *  <path>", ...) -- cargo's own bold green for every such verb, success
+     *  included, not just a distinct "done" color. */
+    def action(s: String, stream: java.io.PrintStream = System.err): String = paint(BOLD_GREEN, s, stream)
+    /** Plain emphasis, no color -- section headers in `--help` output. */
+    def bold(s: String, stream: java.io.PrintStream = System.out): String = paint(BOLD, s, stream)
+
   def die(msg: String): Nothing =
-    System.err.println(s"scalino: $msg")
+    System.err.println(Color.error(s"scalino: $msg"))
     sys.exit(1)
 
   /** Raised by anything in the compile/link/resolve pipeline that can fail
@@ -231,7 +320,7 @@ object ScalinoCli:
         anyDirectiveKeyRe.findFirstMatchIn(line).foreach { m =>
           val key = m.group(1)
           if !recognizedDirectiveKeys(key) && warnedKeys.add(key) then
-            System.err.println(s"scalino: warning: unsupported directive '//> using $key' in $src -- ignoring")
+            System.err.println(Color.warn(s"scalino: warning: unsupported directive '//> using $key' in $src -- ignoring"))
         }
         directiveValues(line, "dep", "deps", "dependency", "dependencies").foreach(vs => deps = deps ++ vs)
         directiveValues(line, "compileOnly.dep", "compileOnly.deps", "compileOnly.dependency", "compileOnly.dependencies").foreach(vs => compileOnlyDeps = compileOnlyDeps ++ vs)
@@ -382,7 +471,7 @@ object ScalinoCli:
           val coords = deps.map(toCoursierCoord) ::: alwaysIncludedArtifacts
           val excludeFlags = excludedArtifacts.flatMap(a => List("-E", a))
           val repoFlags = repositories.flatMap(r => List("-r", r))
-          System.err.println(s"scalino: resolving ${deps.mkString(", ")}")
+          System.err.println(Color.action(s"scalino: resolving ${deps.mkString(", ")}"))
           val (code, cp) = runCaptureStdout(cs :: "fetch" :: coords ::: excludeFlags ::: repoFlags ::: List("--classpath"))
           if code != 0 then fail(s"dependency resolution failed for: ${deps.mkString(", ")}")
           Files.write(cacheFile, cp.getBytes("UTF-8"))
@@ -411,7 +500,7 @@ object ScalinoCli:
           val cs = s"$dist/scalino-cs"
           val coords = deps.map(toCoursierCoord)
           val repoFlags = repositories.flatMap(r => List("-r", r))
-          System.err.println(s"scalino: fetching sources for ${deps.mkString(", ")} (best-effort, for go-to-definition)")
+          System.err.println(Color.action(s"scalino: fetching sources for ${deps.mkString(", ")} (best-effort, for go-to-definition)"))
           runCaptureStdout(cs :: "fetch" :: coords ::: repoFlags ::: List("--classifier", "sources"))
           Files.write(marker, Array.emptyByteArray)
       catch case scala.util.control.NonFatal(_) => ()
@@ -1020,6 +1109,18 @@ object ScalinoCli:
 
     s"""object ScalinoCliTestMain:
        |  def main(args: Array[String]): Unit =
+       |    // Same NO_COLOR/CLICOLOR_FORCE/TERM=dumb/isatty convention as
+       |    // scalino itself (cli/ScalinoCli.scala's own Color object) --
+       |    // duplicated here, not shared, since this file is compiled as
+       |    // a wholly separate program from the `scalino` binary itself.
+       |    val colorOn =
+       |      System.getenv("NO_COLOR") == null &&
+       |      ((System.getenv("CLICOLOR_FORCE") != null && System.getenv("CLICOLOR_FORCE") != "0") ||
+       |       (System.getenv("TERM") != "dumb" && scala.scalanative.posix.unistd.isatty(1) != 0))
+       |    def paint(code: String, s: String): String = if colorOn then code + s + "\\u001b[0m" else s
+       |    def red(s: String): String = paint("\\u001b[1;31m", s)
+       |    def green(s: String): String = paint("\\u001b[1;32m", s)
+       |
        |    val logger = new sbt.testing.Logger:
        |      def ansiCodesSupported(): Boolean = false
        |      def error(msg: String): Unit = System.err.println(msg)
@@ -1039,18 +1140,19 @@ object ScalinoCli:
        |          case sbt.testing.Status.Success => passed += 1
        |          case sbt.testing.Status.Failure =>
        |            failed += 1
-       |            println("FAILED: " + e.fullyQualifiedName())
+       |            println(red("FAILED: " + e.fullyQualifiedName()))
        |            if e.throwable().isDefined() then e.throwable().get().printStackTrace()
        |          case sbt.testing.Status.Error =>
        |            errored += 1
-       |            println("ERROR: " + e.fullyQualifiedName())
+       |            println(red("ERROR: " + e.fullyQualifiedName()))
        |            if e.throwable().isDefined() then e.throwable().get().printStackTrace()
        |          case sbt.testing.Status.Skipped | sbt.testing.Status.Ignored | sbt.testing.Status.Pending | sbt.testing.Status.Canceled =>
        |            skipped += 1
        |
        |$groups
        |
-       |    println("scalino: " + passed + " passed, " + failed + " failed, " + errored + " errored, " + skipped + " skipped")
+       |    val summaryLine = "scalino: " + passed + " passed, " + failed + " failed, " + errored + " errored, " + skipped + " skipped"
+       |    println(if failed > 0 || errored > 0 then red(summaryLine) else green(summaryLine))
        |    if failed > 0 || errored > 0 then sys.exit(1)
        |""".stripMargin
 
@@ -1431,7 +1533,7 @@ object ScalinoCli:
       // scala-cli/sbt both print a line before a real compile -- scalino-dotc
       // itself stays silent on success (no "compiling..." banner of its own),
       // so without this a multi-second compile looks like scalino hung.
-      System.err.println(s"scalino: compiling ${toCompile.size} source(s) to $classesDir")
+      System.err.println(Color.action(s"scalino: compiling ${toCompile.size} source(s) to $classesDir"))
       // classesDir on the compile classpath (harmless on a full rebuild --
       // it's freshly emptied above) is what lets scalino-dotc resolve
       // symbols from files it isn't recompiling this round out of their
@@ -1595,13 +1697,14 @@ object ScalinoCli:
     out.print(
       s"""scalino: a mini scala-cli, self-hosted on scalino (no JVM anywhere)
          |
-         |usage:
+         |${Color.bold("usage:", out)}
          |  scalino <sources...>                   run (default command)
          |  scalino run <sources...> [options]     compile and run
          |  scalino compile <sources...> [options]   compile only, no link (see build output)
          |  scalino package <sources...> [options] -o <out>   compile and link a native binary
          |  scalino test <sources...> [options] [-- <framework args>]   compile and run tests
          |  scalino setup-ide <sources...> [options]   write .scalino-build/scalino-lsp.json for editor LSP support
+         |  scalino clean                          delete the .scalino-build directory
          |  scalino version                        print version info
          |  scalino --help                         this message
          |
@@ -1616,7 +1719,7 @@ object ScalinoCli:
          |from the last build instead of being recompiled -- pass
          |--no-incremental to always fully recompile.
          |
-         |options:
+         |${Color.bold("options:", out)}
          |  --main-class <name>        explicit entry point (skips auto-detection)
          |  --dep <coord>              add a dependency (repeatable; no -d short form -- real
          |                             scala-cli's -d means --output, not --dependency)
@@ -1635,6 +1738,8 @@ object ScalinoCli:
          |  -o, --output <path>        output path (package only)
          |  -v, --verbose              show full build-tool debug output (raw clang/linker invocations)
          |  -q, --quiet                only show warnings/errors
+         |  --color <always|auto|never>   colorize output (auto by default; also honors
+         |                             NO_COLOR/CLICOLOR_FORCE, cargo/scala-cli-style)
          |  --test-framework <class>   explicit test framework class (skips auto-detection; test only)
          |  --no-incremental           always fully recompile (skip the incremental-compile cache)
          |  -- <args...>               program args (run) or test-framework filter args (test),
@@ -1794,7 +1899,7 @@ object ScalinoCli:
     directives.scalaVersion.orElse(o.cliScala).foreach { v =>
       if !BuildInfo.scalaVersion.startsWith(v) then
         System.err.println(
-          s"scalino: warning: scala \"$v\" requested, but this toolchain only supports ${BuildInfo.scalaVersion} -- ignoring"
+          Color.warn(s"scalino: warning: scala \"$v\" requested, but this toolchain only supports ${BuildInfo.scalaVersion} -- ignoring")
         )
     }
     val allDeps = (directives.deps ++ o.cliDeps).distinct
@@ -1815,11 +1920,11 @@ object ScalinoCli:
         def outPathFor(mc: String): Path = Paths.get(o.out.getOrElse(mc.substring(mc.lastIndexOf('.') + 1)))
         val mainClass = buildBinary(expanded, explicitMainClass, extraClasspath, outPathFor, options, extraCompileOnlyClasspath, o.logLevel, !o.noIncremental, nativeOpts)
         val outPath = outPathFor(mainClass)
-        if !o.quiet then println(s"scalino: wrote $outPath (main class: $mainClass)")
+        if !o.quiet then println(Color.action(s"scalino: wrote $outPath (main class: $mainClass)", System.out))
         0
       case "compile" =>
         compileOnly(expanded, extraClasspath, options, extraCompileOnlyClasspath, !o.noIncremental)
-        if !o.quiet then println(s"scalino: compiled ${expanded.size} source(s)")
+        if !o.quiet then println(Color.action(s"scalino: compiled ${expanded.size} source(s)", System.out))
         0
 
   /** Polls source mtimes every 500ms and reruns `attempt` on change --
@@ -1830,14 +1935,14 @@ object ScalinoCli:
     def mtimes(): Map[Path, Long] =
       sources.filter(Files.exists(_)).map(p => p -> Files.getLastModifiedTime(p).toMillis).toMap
     attempt()
-    System.err.println("scalino: watching for changes (Ctrl+C to stop)...")
+    System.err.println(Color.action("scalino: watching for changes (Ctrl+C to stop)..."))
     var last = mtimes()
     while true do
       Thread.sleep(500)
       val cur = mtimes()
       if cur != last then
         last = cur
-        System.err.println("scalino: change detected, rebuilding...")
+        System.err.println(Color.action("scalino: change detected, rebuilding..."))
         attempt()
 
   def handleRunOrCompile(mode: String, args: Array[String]): Unit =
@@ -1851,7 +1956,7 @@ object ScalinoCli:
       val watchPaths = expanded ++ expandWatchPaths(o.cliWatchingPaths.map(Paths.get(_)))
       watchLoop(watchPaths) { () =>
         try buildAndMaybeRun(mode, expanded, o)
-        catch case BuildFailed(msg) => System.err.println(s"scalino: $msg")
+        catch case BuildFailed(msg) => System.err.println(Color.error(s"scalino: $msg"))
       }
     else
       try sys.exit(buildAndMaybeRun(mode, expanded, o))
@@ -1918,10 +2023,10 @@ object ScalinoCli:
 
       val matches = discoverTestClasses(classesDir, specs, testJars)
       if matches.isEmpty then
-        if !o.quiet then println("scalino: no tests found")
+        if !o.quiet then println(Color.action("scalino: no tests found", System.out))
         0
       else
-        if !o.quiet then println(s"scalino: found ${matches.length} test class(es): ${matches.map(_.className).sorted.mkString(", ")}")
+        if !o.quiet then println(Color.action(s"scalino: found ${matches.length} test class(es): ${matches.map(_.className).sorted.mkString(", ")}", System.out))
         val driverSrc = Paths.get(".scalino-build", "_scratch", "ScalinoCliTestMain.scala")
         Files.write(driverSrc, generateTestMain(matches).getBytes("UTF-8"))
         val binPath = Paths.get(".scalino-build", "ScalinoCliTestMain", "bin")
@@ -1931,7 +2036,7 @@ object ScalinoCli:
     if o.watch then
       watchLoop(expanded) { () =>
         try attempt()
-        catch case BuildFailed(msg) => System.err.println(s"scalino: $msg")
+        catch case BuildFailed(msg) => System.err.println(Color.error(s"scalino: $msg"))
       }
     else
       try sys.exit(attempt())
@@ -2009,7 +2114,7 @@ object ScalinoCli:
     // and classDirectory, not a second one just for this file.
     val configPath = Paths.get(".scalino-build", "scalino-lsp.json")
     Files.write(configPath, json.getBytes("UTF-8"))
-    println(s"scalino: wrote ${configPath.toAbsolutePath} -- point dist/scalino-lsp (or an editor's LSP binary override) at this project")
+    println(Color.action(s"scalino: wrote ${configPath.toAbsolutePath} -- point dist/scalino-lsp (or an editor's LSP binary override) at this project", System.out))
 
     // No editor-specific settings.json is written here anymore: install.sh
     // symlinks scalino-lsp onto PATH alongside scalino, and both editor
@@ -2023,7 +2128,15 @@ object ScalinoCli:
     // per-project editor preference, not something this command should
     // guess at or overwrite.
 
-  def main(args: Array[String]): Unit =
+  def handleClean(args: Array[String]): Unit =
+    if args.nonEmpty then die(s"clean: unexpected argument '${args(0)}'")
+    val buildDir = Paths.get(".scalino-build")
+    if Files.exists(buildDir) then
+      deleteRecursively(buildDir)
+      System.err.println(Color.action(s"removed $buildDir", System.err))
+
+  def main(rawArgs: Array[String]): Unit =
+    val args = extractColorFlag(rawArgs)
     if args.isEmpty then { printUsage(System.err); sys.exit(1) }
     args(0) match
       case "-h" | "--help" => printUsage(System.out)
@@ -2036,6 +2149,7 @@ object ScalinoCli:
       case "package" => handleRunOrCompile("package", args.drop(1))
       case "test" => handleTest(args.drop(1))
       case "setup-ide" => handleSetupIde(args.drop(1))
+      case "clean" => handleClean(args.drop(1))
       case first if first.startsWith("-") || Files.exists(Paths.get(first)) =>
         handleRunOrCompile("run", args) // implicit `run`, e.g. `scalino Foo.scala`
       case other =>
