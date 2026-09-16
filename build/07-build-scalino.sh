@@ -104,4 +104,12 @@ LINK_CP="$(to_native_path "$CLASSES_DIR")$CP_SEP$(cat "$NATIVELIBS_CP")$CP_SEP$N
 
 cp "$LINK_DIR/ScalinoCli" "$DIST/scalino"
 chmod +x "$DIST/scalino"
+# See 08-build-scalino-lsp.sh's identical guard: on macOS/arm64 the
+# linker's own ad-hoc signature is sometimes rejected by the kernel at
+# exec time (SIGKILL, 0 CPU time used, no crash report -- AMFI
+# code-signature rejection, not a runtime crash). Re-signing ad-hoc
+# ourselves after the copy reliably fixes it. Harmless no-op on Linux.
+if command -v codesign >/dev/null 2>&1; then
+  codesign -s - -f "$DIST/scalino"
+fi
 echo "OK: $DIST/scalino"
