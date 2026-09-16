@@ -24,8 +24,10 @@ NATIVE_BINARY_VERSION="$(echo "$SCALA_NATIVE_VERSION" | cut -d. -f1,2)"
 
 cat > "$SRC_DIR/BuildInfo.scala" <<EOF
 object BuildInfo:
+  val scalinoVersion: String = "$SCALINO_VERSION"
   val scalaVersion: String = "$SCALA_VERSION"
   val nativeBinaryVersion: String = "$NATIVE_BINARY_VERSION"
+  val nativeVersion: String = "$SCALA_NATIVE_VERSION"
 EOF
 
 # scalino locates its own dist/ root via a tiny OS-specific native binding

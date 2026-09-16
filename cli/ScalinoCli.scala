@@ -1595,7 +1595,7 @@ object ScalinoCli:
   )
 
   def printVersion(): Unit =
-    println(s"scalino (scalino) -- Scala ${BuildInfo.scalaVersion}, scala-native ${BuildInfo.nativeBinaryVersion}.x")
+    println(s"scalino ${BuildInfo.scalinoVersion} -- Scala ${BuildInfo.scalaVersion}, Scala Native ${BuildInfo.nativeVersion}")
 
   def printUsage(out: java.io.PrintStream): Unit =
     out.print(
