@@ -1,5 +1,5 @@
 diff --git a/compiler/src/dotty/tools/dotc/quoted/Interpreter.scala b/compiler/src/dotty/tools/dotc/quoted/Interpreter.scala
-index 04cb637b..df414807 100644
+index 04cb637b..3f8cf682 100644
 --- a/compiler/src/dotty/tools/dotc/quoted/Interpreter.scala
 +++ b/compiler/src/dotty/tools/dotc/quoted/Interpreter.scala
 @@ -1,6 +1,7 @@
@@ -130,7 +130,7 @@ index 04cb637b..df414807 100644
    /** Returns the result of interpreting the code in the tree.
     *  Return Some of the result or None if the result type is not consistent with the expected type.
     *  Throws a StopInterpretation if the tree could not be interpreted or a runtime exception occurred.
-@@ -59,43 +148,350 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
+@@ -59,43 +148,366 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
    /** Returns the result of interpreting the code in the tree.
     *  Throws a StopInterpretation if the tree could not be interpreted or a runtime exception occurred.
     */
@@ -453,7 +453,23 @@ index 04cb637b..df414807 100644
 +        // `rawArgs` left-to-right instead whenever there are any.
 +        val v = env(fn.symbol)
 +        if rawArgs.isEmpty then v
-+        else rawArgs.foldLeft(v)((acc, argTree) => applyFn1(acc, interpretTree(argTree)))
++        else
++          // Apply one *param-list group* at a time (`args: List[List[Tree]]`,
++          // still in scope from the outer `Call(fn, args)` match), not
++          // `rawArgs` (`args.flatten`, which loses the grouping). Folding
++          // over the FLATTENED list one arg at a time via `applyFn1` alone
++          // is only correct if every original param list had exactly one
++          // arg (true currying) -- but a real, common shape here is
++          // `Quotes ?=> (A, B) => C` (e.g. jsoniter-scala's own `writeVal`/
++          // `readVal` helper params), whose SECOND param list carries TWO
++          // args at once. Folding that flattened would call `applyFn1` on
++          // the already-real `Function2` result of the first (correct,
++          // one-arg) application with just ONE of its two args, crashing
++          // with "not a callable single-argument function" (confirmed via
++          // `SCALINO_INTERP_DEBUG=1`: the value was a real `Function2`, not
++          // `Function1`). Applying each ORIGINAL group as one call, with
++          // the group's own arity, avoids that.
++          args.foldLeft(v)((acc, argGroup) => applyFnGroup(acc, argGroup.map(interpretTree)))
 +      else if quotedTypeGivenValue(tree.symbol).isDefined then
 +        quotedTypeGivenValue(tree.symbol).get
        else if (tree.symbol.is(InlineProxy))
@@ -490,7 +506,7 @@ index 04cb637b..df414807 100644
      // Interpret `foo(j = x, i = y)` which it is expanded to
      // `val j$1 = x; val i$1 = y; foo(i = i$1, j = j$1)`
      case Block(stats, expr) => interpretBlock(stats, expr)
-@@ -113,6 +509,19 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
+@@ -113,6 +525,19 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
        unexpectedTree(tree)
    }
  
@@ -510,7 +526,7 @@ index 04cb637b..df414807 100644
    private def interpretArgs(argss: List[List[Tree]], fnType: Type)(using Env): List[Object] = {
      def interpretArgsGroup(args: List[Tree], argTypes: List[Type]): List[Object] =
        assert(args.size == argTypes.size)
-@@ -141,189 +550,4401 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
+@@ -141,189 +566,4441 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
          Nil
    }
  
@@ -1793,7 +1809,23 @@ index 04cb637b..df414807 100644
 +    else interpretCollectionFactory0(moduleClass, fn, args)
 +
 +  private def interpretCollectionFactory0(moduleClass: Symbol, fn: Symbol, args: => List[Object])(using Env): Option[Object] =
-+    def elems: scala.collection.Seq[Object] = args match { case (s: scala.collection.Seq[Object] @unchecked) :: Nil => s; case other => other }
++    // `Array.apply[T](xs: T*)(ct: ClassTag[T])` has a SECOND, implicit
++    // param list -- unlike `List`/`Vector`/`Seq`/`Set`/`Map#apply`, none of
++    // which take a `ClassTag` -- so its own `args` here is `[elemsSeq,
++    // classTagInstance]`, not just `[elemsSeq]`. The single-element-only
++    // match below used to miss this, falling through to `case other =>
++    // other` and returning the whole 2-element `args` list itself as
++    // `elems` -- silently building a bogus 2-element array out of the
++    // varargs Seq and the ClassTag instance instead of unwrapping the real
++    // (often much longer) varargs Seq as the leading element. Matched by
++    // jsoniter-scala-core's own `JsonWriter.escapedChars: Array[Byte]`, a
++    // 128-element `Array(...)` literal that came back as a bogus 2-element
++    // array, crashing an in-bounds `escapedChars(ch.toInt)` lookup with a
++    // real `ArrayIndexOutOfBoundsException` at runtime.
++    def elems: scala.collection.Seq[Object] = args match
++      case (s: scala.collection.Seq[Object] @unchecked) :: Nil => s
++      case (s: scala.collection.Seq[Object] @unchecked) :: _ => s
++      case other => other
 +    def buildFrom(name: String, source: scala.collection.Seq[Object]): Option[Object] =
 +      name.stripSuffix("$") match
 +        case "List" => Some(source.toList)
@@ -2290,22 +2322,7 @@ index 04cb637b..df414807 100644
 +      // outer already claimed.
 +      cls.asClass.baseClasses.foldLeft(withOwner)((e, base) => if e.contains(base) then e else e.updated(base, value))
 +    else withOwner
- 
--  private def loadClass(name: String): Class[?] =
--    try classLoader.loadClass(name)
--    catch
--      case MissingClassValidInCurrentRun(sym, origin) =>
--        suspendOnMissing(sym, origin, pos)
--
--
--  private def getMethod(clazz: Class[?], name: Name, paramClasses: List[Class[?]]): JLRMethod =
--    try clazz.getMethod(name.toString, paramClasses*)
--    catch {
--      case _: NoSuchMethodException =>
--        val msg = em"Could not find method ${clazz.getCanonicalName}.$name with parameters ($paramClasses%, %)"
--        throw new StopInterpretation(msg, pos)
--      case MissingClassValidInCurrentRun(sym, origin) =>
--        suspendOnMissing(sym, origin, pos)
++
 +  /** A handful of mutable stdlib collection classes constructed directly as
 +   *  real host objects instead of via `interpretNew`'s tree-walking (their
 +   *  own constructors/methods are library bytecode with no retained defTree
@@ -2901,7 +2918,22 @@ index 04cb637b..df414807 100644
 +        if root.isEmpty then tpd.EmptyTree
 +        else findDefTree(root, sym).getOrElse(tpd.EmptyTree)
 +      else tpd.EmptyTree
-+
+ 
+-  private def loadClass(name: String): Class[?] =
+-    try classLoader.loadClass(name)
+-    catch
+-      case MissingClassValidInCurrentRun(sym, origin) =>
+-        suspendOnMissing(sym, origin, pos)
+-
+-
+-  private def getMethod(clazz: Class[?], name: Name, paramClasses: List[Class[?]]): JLRMethod =
+-    try clazz.getMethod(name.toString, paramClasses*)
+-    catch {
+-      case _: NoSuchMethodException =>
+-        val msg = em"Could not find method ${clazz.getCanonicalName}.$name with parameters ($paramClasses%, %)"
+-        throw new StopInterpretation(msg, pos)
+-      case MissingClassValidInCurrentRun(sym, origin) =>
+-        suspendOnMissing(sym, origin, pos)
 +  /** Searches a whole-compilation-unit tree (from `rootTreeContaining`) for
 +   *  the `DefDef`/`ValDef` defining `target`, descending through packages,
 +   *  nested classes/objects (`Template.constr` for the primary constructor,
@@ -4240,6 +4272,30 @@ index 04cb637b..df414807 100644
 +    case inst: InterpretedInstance => callInstanceMethodDirect(inst, "apply", List(arg))
 +    case _ => throw new StopInterpretation(em"Interpreter (own implementation): not a callable single-argument function: ${f.toString}", pos)
 +
++  /** Like `applyFn1`, but for a whole original param-list *group* (see the
++   *  call site in `interpretTree0`'s `Call(fn, args)` handling, `env
++   *  .contains(fn.symbol)` case, for why grouping -- rather than a fully
++   *  flattened arg list -- matters): dispatches to whichever real
++   *  `FunctionN`/`InterpretedInstance` shape the group's own arity actually
++   *  needs.
++   */
++  private def applyFnGroup(f: Object, groupArgs: List[Object])(using Env): Object = groupArgs match
++    case Nil => f
++    case arg :: Nil => applyFn1(f, arg)
++    case a :: b :: Nil => f match
++      case f: Function2[Object, Object, Object] @unchecked => f(a, b)
++      case inst: InterpretedInstance => callInstanceMethodDirect(inst, "apply", groupArgs)
++      case _ => throw new StopInterpretation(em"Interpreter (own implementation): not a callable two-argument function: ${f.toString}", pos)
++    case a :: b :: c :: Nil => f match
++      case f: Function3[Object, Object, Object, Object] @unchecked => f(a, b, c)
++      case inst: InterpretedInstance => callInstanceMethodDirect(inst, "apply", groupArgs)
++      case _ => throw new StopInterpretation(em"Interpreter (own implementation): not a callable three-argument function: ${f.toString}", pos)
++    case a :: b :: c :: d :: Nil => f match
++      case f: Function4[Object, Object, Object, Object, Object] @unchecked => f(a, b, c, d)
++      case inst: InterpretedInstance => callInstanceMethodDirect(inst, "apply", groupArgs)
++      case _ => throw new StopInterpretation(em"Interpreter (own implementation): not a callable four-argument function: ${f.toString}", pos)
++    case _ => throw new StopInterpretation(em"Interpreter (own implementation): unsupported arity ${groupArgs.size} for direct function value application", pos)
++
 +  private def callInstanceMethodDirect(inst: InterpretedInstance, methodName: String, args: List[Object])(using Env): Object =
 +    inst.cls.info.member(methodName.toTermName).suchThat(_.is(Method)).symbol.defTree match
 +      case ddef: DefDef if !ddef.rhs.isEmpty =>
@@ -5065,7 +5121,7 @@ index 04cb637b..df414807 100644
    object Call:
      import tpd.*
 diff --git a/compiler/src/dotty/tools/dotc/transform/Splicer.scala b/compiler/src/dotty/tools/dotc/transform/Splicer.scala
-index 9a713f75..98ea1003 100644
+index 9a713f75..149342fc 100644
 --- a/compiler/src/dotty/tools/dotc/transform/Splicer.scala
 +++ b/compiler/src/dotty/tools/dotc/transform/Splicer.scala
 @@ -6,6 +6,7 @@ import java.io.{PrintWriter, StringWriter}
@@ -5151,11 +5207,75 @@ index 9a713f75..98ea1003 100644
          val body1 = body match {
            case expr: Ident if expr.symbol.isAllOf(InlineByNameProxy) =>
              // inline proxy for by-name parameter
-@@ -255,14 +294,85 @@ object Splicer {
+@@ -255,14 +294,149 @@ object Splicer {
            case tree: Inlined if tree.inlinedFromOuterScope => tree.expansion
            case _ => body
          }
 -        new ExprImpl(Inlined(EmptyTree, Nil, QuoteUtils.changeOwnerOfTree(body1, ctx.owner)).withSpan(body1.span), SpliceScope.getCurrent)
++        // Force every lazy field (a `DefDef`'s `.rhs`, most importantly)
++        // reachable from `body1` *now*, before any of the transformations
++        // below touch it. Mirrors what real dotc's own `PickledQuotes
++        // .unpickle` already does right after unpickling a quote ("Make
++        // sure trees and positions are fully loaded", `tree.foreachSubTree
++        // (identity)`) for the `unpickleExprV2` path -- this `body`, reached
++        // via a literal, retained-source `Quote` node instead, never went
++        // through that warm-up. Without it, a nested lambda buried in
++        // `body1` (e.g. jsoniter-scala's own `x => ${writeVal(out, 'x)}`
++        // inside `genWriteArray`) has its own lazy, TASTY-backed `.rhs`
++        // force-read for the first time much later, deep inside
++        // `changeNonLocalOwners`'s `TreeTypeMap` walk below -- which,
++        // empirically (confirmed via `SCALINO_INTERP_DEBUG=1`, which forces
++        // things via its own `.show` calls and happens to avoid this).
++        // sometimes corrupts the TASTY reader's position, crashing with a
++        // `MatchError` on a stray modifier-flag byte
++        // (`readSimpleType`/`readConstant` don't expect one, since it's only
++        // ever legal inside a modifier list, never as a standalone tree/type
++        // tag) deep in `TreeUnpickler`. Forcing everything upfront, in one
++        // coherent pass, avoids whatever ordering-sensitive state this
++        // depends on.
++        body1.foreachSubTree(identity)
++        // A quote's own body can locally declare a `val` (e.g.
++        // jsoniter-scala's `genReadCollection`'s `val x = $newBuilder`)
++        // whose *retained-tree* symbol still has its ORIGINAL, foreign,
++        // other-compilation-run owner, and (for a generic helper) an
++        // unsubstituted bare type-parameter type (`B`, not yet
++        // `ArrayBuffer[Int]`). `resolveNestedSplices` below, resolving a
++        // nested splice inside e.g. `x.addOne(${...})`'s own arguments,
++        // forces `TypedTreeCopier` to rebuild and immediately *re-typecheck*
++        // the enclosing `x.addOne(...)` Apply as soon as its args change --
++        // which re-derives `x`'s member `addOne` against that still-foreign,
++        // still-abstract symbol *before* either substitution below (at their
++        // usual, post-`resolveNestedSplices` spot) ever used to run, so the
++        // lookup genuinely failed ("undefined: x.addOne ... at inlining";
++        // confirmed via `SCALINO_INTERP_DEBUG=1`: `x`'s symbol's denotation
++        // isn't valid at the current period, and its owner is still the
++        // original, foreign `method genReadCollection`). Rebasing owners AND
++        // substituting type bindings first, on the raw retained body, means
++        // every reference `resolveNestedSplices` later touches -- including
++        // ones nested inside not-yet-evaluated `Quote`/`Splice` subtrees,
++        // like the `'x` argument to `readVal('x)` -- already carries a
++        // fresh, current-run-valid, fully-substituted symbol.
++        //
++        // The type-bindings substitution here is restricted to *type*
++        // symbols (`sym.isType`), unlike the equivalent, unfiltered one
++        // further below: `env` can also map a *term* symbol directly to a
++        // raw `Type` (a `given Type[V]` parameter, e.g. `evidence$2`, bound
++        // this way by this interpreter's own call-binding convention, not a
++        // genuine type variable). Substituting that in too here corrupts any
++        // still-unevaluated nested splice that references it as a *value*
++        // (e.g. `genNullValue[V](...)(evidence$2, ...)`): `Type#subst`
++        // replaces the whole `TermRef` with the bare `Type` itself, so the
++        // interpreter later tries to evaluate that argument expression as if
++        // it were calling the type's own class. Applying the substitution
++        // only to genuine type variables here avoids that; the unfiltered,
++        // later application (on the fully-resolved `body2`, where such
++        // term-level references are already actual values, not `Ident`
++        // trees) is unaffected either way and is left as-is.
++        val earlyTypeBindings = env.iterator.collect { case (sym, tp: Type) if sym.isType => (sym, tp) }.toList
++        val body1b =
++          if earlyTypeBindings.isEmpty then body1
++          else new TreeTypeMap(typeMap = _.subst(earlyTypeBindings.map(_._1), earlyTypeBindings.map(_._2))).transform(body1)
++        val body1c = body1b.changeNonLocalOwners(ctx.owner)
 +        // The "without level 0 splices" assumption above doesn't always hold:
 +        // a derivation macro can build a quote wrapping a class whose OWN
 +        // method bodies are themselves splices (e.g. jsoniter-scala's
@@ -5164,7 +5284,7 @@ index 9a713f75..98ea1003 100644
 +        // text (still referencing this interpretation's `this`/locals) would
 +        // leak verbatim into the final spliced-in tree. Resolve them here,
 +        // in this same interpretation context, while `env` is still valid.
-+        val body2 = resolveNestedSplices(body1)
++        val body2 = resolveNestedSplices(body1c)
 +        // A term-level quote pattern's bound type variable (e.g. `h` in
 +        // `case '{ $head: Encoder[h] } => '{ ... contramapN[h *: EmptyTuple] ... } }`,
 +        // see `Interpreter.unifyPatternType`) is bound in `env` to the real,

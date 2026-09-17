@@ -1,0 +1,30 @@
+diff --git a/compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala b/compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala
+index 98a9de45..514a87a0 100644
+--- a/compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala
++++ b/compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala
+@@ -509,6 +509,25 @@ class TreeUnpickler(reader: TastyReader,
+           if isBestEffortTasty then new PreviousErrorType
+           else throw new Error(s"Illegal ERRORtype in non Best Effort TASTy file")
+         case _ =>
++          val isValidConstTag = tag == UNITconst || tag == FALSEconst || tag == TRUEconst || tag == NULLconst ||
++            tag == BYTEconst || tag == SHORTconst || tag == CHARconst || tag == INTconst ||
++            tag == LONGconst || tag == FLOATconst || tag == DOUBLEconst || tag == STRINGconst || tag == CLASSconst
++          if !isValidConstTag then
++            // Diagnostic left UNCONDITIONAL (not gated by
++            // Interpreter.debugEnabled): this branch only fires for a tag
++            // value that is illegal here regardless (never a valid
++            // Category-1 tree tag NOR a valid constant tag -- confirmed by
++            // cross-referencing TastyFormat's own tag tables), so it's rare
++            // enough not to disturb timing/GC behavior the way full
++            // interpreter debug logging does -- which matters here since
++            // this bug (an intermittent `MatchError` on this exact
++            // `readConstant(tag)` fallback, hit while lazily forcing a
++            // `DefDef.rhs` during an owner-rebase tree walk) was observed to
++            // reproduce consistently WITHOUT `SCALINO_INTERP_DEBUG=1` but to
++            // NOT reproduce (a different bug surfaced instead) WITH it --
++            // i.e. it's timing/GC-sensitive, and the heavier debug logging
++            // path masks it.
++            Console.err.println(s"[readSimpleType-fallback-INVALID] tag=$tag (${astTagToString(tag)}) start=$start currentAddr=$currentAddr ctx.owner=${ctx.owner} ctx.owner.id=${System.identityHashCode(ctx.owner)} ctx.source=${ctx.source} enclosing symbols: ${ctx.outersIterator.take(8).map(_.owner).mkString(" < ")}")
+           ConstantType(readConstant(tag))
+       }
+ 
