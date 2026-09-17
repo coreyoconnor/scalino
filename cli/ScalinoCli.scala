@@ -1683,11 +1683,12 @@ object ScalinoCli:
   //   scalino <sources...>                       run (default command, like
   //                                            `scala-cli Foo.scala`)
   //   scalino run <sources...> [options]
-  //   scalino compile <sources...> -o <out> [options]
+  //   scalino compile <sources...> [options]
+  //   scalino package <sources...> -o <out> [options]
   //   scalino version / scalino --help
   // options: --main-class X | --dep coord | -S/--scala ver |
-  //          -O/--scalac-option opt | -w/--watch | -o/--output path |
-  //          -v/--verbose | -q/--quiet | -- <program args...>
+  //          -O/--scalac-option opt | -w/--watch | -o/--output path
+  //          (package only) | -v/--verbose | -q/--quiet | -- <program args...>
   // ---------------------------------------------------------------------
 
   def printVersion(): Unit =
@@ -1947,6 +1948,8 @@ object ScalinoCli:
 
   def handleRunOrCompile(mode: String, args: Array[String]): Unit =
     val o = defaultToCwd(parseRunOpts(args))
+    if mode == "compile" && o.out.isDefined then
+      die("compile: -o/--output is not valid here -- use 'scalino package -o' to produce a binary")
     o.sources.find(!Files.exists(_)).foreach(p => die(s"no such file: $p"))
     val allExpanded = expandSources(o.sources)
     if allExpanded.isEmpty then die("no .scala files found")

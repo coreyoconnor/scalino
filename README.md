@@ -71,7 +71,7 @@ scalino examples/Hello.scala                                                # ru
 scalino run examples/macro-hello/Test.scala examples/macro-hello/Foo.scala  # a real macro
 scalino run examples/ --main-class Hello                                    # a whole directory
 scalino run examples/Hello.scala -w                                         # watch mode
-scalino compile examples/Hello.scala -o hello && ./hello
+scalino package examples/Hello.scala -o hello && ./hello
 ```
 
 It finds your entry point automatically (`@main`, `extends App`, `def main`),

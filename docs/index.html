@@ -235,7 +235,7 @@ sudo apt install ./scalino_X.Y.Z_amd64.deb
     <button class="tab" data-panel="a-macro">Real macros</button>
     <button class="tab" data-panel="a-deps">Dependencies</button>
     <button class="tab" data-panel="a-watch">Watch mode</button>
-    <button class="tab" data-panel="a-compile">Compile a binary</button>
+    <button class="tab" data-panel="a-compile">Build a binary</button>
     <button class="tab" data-panel="a-ide">Editor setup</button>
   </div>
   <div class="panelwrap">
@@ -266,7 +266,7 @@ sudo apt install ./scalino_X.Y.Z_amd64.deb
     <div class="panel" id="a-watch"><pre>scalino run -w</pre>
       <div class="note">Rebuilds and reruns on save. Same flags as scala-cli: <code class="mono">--dep</code>, <code class="mono">-S/--scala</code>, <code class="mono">-O/--scalac-option</code>, <code class="mono">--main-class</code>, <code class="mono">-o/--output</code>.</div></div>
 
-    <div class="panel" id="a-compile"><pre>scalino compile -o hello
+    <div class="panel" id="a-compile"><pre>scalino package -o hello
 ./hello</pre>
       <div class="note">A real, standalone native executable — no JVM, no bytecode, nothing to install on the machine that runs it.</div></div>
 
