@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scalino — Scala 3, compiled straight to native. No JVM.</title>
+<meta name="description" content="scalino compiles Scala 3 straight to a native executable via Scala Native. No bytecode, no JIT, no java on your machine — not even to build the compiler itself.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23C1440E'/><text x='50' y='68' font-size='58' font-family='monospace' font-weight='bold' fill='white' text-anchor='middle'>s</text></svg>">
+<style>
+  :root{
+    --bg:#fbfaf8;
+    --bg-alt:#f2efe9;
+    --ink:#1c1a17;
+    --ink-dim:#5b564d;
+    --line:#e4ded3;
+    --accent:#c1440e;
+    --accent-ink:#ffffff;
+    --code-bg:#1c1a17;
+    --code-ink:#f2efe9;
+    --code-comment:#8a8478;
+    --code-string:#9fc27a;
+    --code-keyword:#e8a24c;
+    --code-type:#7ab3d9;
+    --shadow: 0 1px 2px rgba(28,26,23,.04), 0 8px 24px rgba(28,26,23,.05);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#151311;
+      --bg-alt:#1c1a17;
+      --ink:#f2efe9;
+      --ink-dim:#b3ab9d;
+      --line:#332f29;
+      --accent:#e8703a;
+      --accent-ink:#151311;
+      --code-bg:#0e0d0b;
+      --code-ink:#f2efe9;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1040px;margin:0 auto;padding:0 24px}
+  a{color:inherit}
+  code, pre, .mono{font-family:"SF Mono",ui-monospace,Menlo,Consolas,"Liberation Mono",monospace}
+
+  /* nav */
+  header.nav{
+    position:sticky;top:0;z-index:20;
+    background:color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);
+  }
+  .nav .wrap{display:flex;align-items:center;gap:28px;height:60px}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:17px;text-decoration:none;flex:none}
+  .scala-logo{color:var(--ink);flex:none}
+  .navlinks{display:flex;gap:22px;overflow-x:auto;flex:1;scrollbar-width:none}
+  .navlinks::-webkit-scrollbar{display:none}
+  .navlinks a{white-space:nowrap;font-size:14px;text-decoration:none;color:var(--ink-dim);padding:4px 0;border-bottom:2px solid transparent}
+  .navlinks a:hover{color:var(--ink);border-color:var(--accent)}
+  .navgh{flex:none;font-size:14px;text-decoration:none;color:var(--ink-dim);border:1px solid var(--line);padding:6px 12px;border-radius:7px;white-space:nowrap}
+  .navgh:hover{border-color:var(--accent);color:var(--ink)}
+
+  /* hero */
+  .hero{padding:88px 0 56px;text-align:center}
+  .kicker{display:inline-block;font-size:13px;letter-spacing:.04em;color:var(--accent);background:color-mix(in srgb, var(--accent) 12%, transparent);border:1px solid color-mix(in srgb, var(--accent) 35%, transparent);padding:5px 12px;border-radius:999px;margin-bottom:22px;font-weight:600}
+  h1{font-size:clamp(30px,5vw,50px);line-height:1.12;margin:0 0 20px;letter-spacing:-.01em;font-weight:700}
+  h1 em{color:var(--accent);font-style:normal}
+  .lead{max-width:640px;margin:0 auto 34px;color:var(--ink-dim);font-size:18px}
+  .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:44px}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:12px 22px;border-radius:9px;font-weight:600;font-size:15px;text-decoration:none;border:1px solid transparent}
+  .btn.primary{background:var(--accent);color:var(--accent-ink)}
+  .btn.primary:hover{opacity:.9}
+  .btn.ghost{border-color:var(--line);color:var(--ink)}
+  .btn.ghost:hover{border-color:var(--accent);color:var(--accent)}
+
+  .installbar{max-width:640px;margin:0 auto;display:flex;align-items:center;background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:14px 10px 14px 18px;box-shadow:var(--shadow);gap:10px}
+  .installbar code{flex:1;text-align:left;font-size:13.5px;overflow-x:auto;white-space:nowrap;color:var(--code-ink)}
+  .installbar code .muted{color:var(--code-comment)}
+  .copybtn{flex:none;background:transparent;border:1px solid #ffffff2b;color:var(--code-ink);border-radius:7px;padding:7px 12px;font-size:12.5px;cursor:pointer;font-family:inherit}
+  .copybtn:hover{border-color:#ffffff5c}
+
+  /* divider */
+  .divider{border:0;height:1px;background:var(--line);margin:0}
+  section{padding:72px 0}
+  .eyebrow{font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);margin:0 0 10px}
+  h2{font-size:clamp(24px,3.4vw,34px);margin:0 0 14px;letter-spacing:-.01em}
+  .section-sub{color:var(--ink-dim);max-width:620px;margin:0 0 40px;font-size:16px}
+
+  /* in action tabs */
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px}
+  .tab{background:transparent;border:1px solid var(--line);color:var(--ink-dim);padding:8px 14px;border-radius:8px;font-size:13.5px;cursor:pointer;font-family:inherit}
+  .tab.active{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+  .panelwrap{background:var(--code-bg);color:var(--code-ink);border-radius:12px;box-shadow:var(--shadow);overflow:hidden}
+  .panel-head{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid #ffffff17;font-size:12.5px;color:var(--code-comment)}
+  .panel{display:none;padding:20px 22px 22px}
+  .panel.active{display:block}
+  .panel pre{margin:0;overflow-x:auto;font-size:13.5px;line-height:1.65}
+  .panel .note{margin-top:14px;color:var(--code-comment);font-size:13px;border-top:1px solid #ffffff17;padding-top:12px}
+  .kw{color:var(--code-keyword)}
+  .st{color:var(--code-string)}
+  .ty{color:var(--code-type)}
+  .cm{color:var(--code-comment)}
+
+  /* benefits */
+  .benefits{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .benefit{background:var(--bg);padding:26px 24px}
+  .benefit .icon{width:36px;height:36px;border-radius:9px;background:color-mix(in srgb, var(--accent) 14%, transparent);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:17px;margin-bottom:14px;font-weight:700}
+  .benefit h3{font-size:16px;margin:0 0 8px}
+  .benefit p{margin:0;color:var(--ink-dim);font-size:14px;line-height:1.55}
+
+  /* status */
+  .status-grid{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+  @media (max-width:720px){.status-grid{grid-template-columns:1fr}}
+  .statuscard{border:1px solid var(--line);border-radius:12px;padding:22px 24px;background:var(--bg-alt)}
+  .statuscard h3{margin:0 0 12px;font-size:15px;display:flex;align-items:center;gap:8px}
+  .statuscard ul{margin:0;padding-left:18px;color:var(--ink-dim);font-size:14.5px}
+  .statuscard li{margin-bottom:8px}
+  .pill{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;letter-spacing:.03em}
+  .pill.ok{background:#2f7d3a22;color:#2f7d3a}
+  .pill.next{background:color-mix(in srgb, var(--accent) 18%, transparent);color:var(--accent)}
+
+  /* editor grid */
+  .editors{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+  .editor{border:1px solid var(--line);border-radius:12px;padding:20px;text-align:center}
+  .editor .glyph{font-size:26px;margin-bottom:8px}
+  .editor h4{margin:0 0 4px;font-size:15px}
+  .editor p{margin:0;color:var(--ink-dim);font-size:13px}
+
+  footer{border-top:1px solid var(--line);background:var(--bg-alt)}
+  .footgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:28px;padding:52px 0 28px}
+  .footcol h5{font-size:12.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-dim);margin:0 0 14px}
+  .footcol a{display:block;font-size:14px;text-decoration:none;color:var(--ink);margin-bottom:10px;opacity:.85}
+  .footcol a:hover{color:var(--accent);opacity:1}
+  .footbottom{border-top:1px solid var(--line);padding:20px 0 32px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;color:var(--ink-dim);font-size:13px}
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="#top">
+      <svg class="scala-logo" viewBox="440 110 300 480" width="20" height="32" aria-hidden="true">
+        <g transform="matrix(1.25,0,0,-1.25,0,750)">
+          <path fill="currentColor" d="M359.293,280.162V252.27c0-4.702,101.439-12.576,167.528-27.893l0,0c31.926,7.402,55.61,16.534,55.61,27.893l0,0v27.892c0,11.351-23.684,20.493-55.61,27.892l0,0C460.732,292.735,359.293,284.859,359.293,280.162"/>
+          <path fill="currentColor" d="M359.293,391.731v-27.893c0-4.702,101.439-12.576,167.528-27.892l0,0c31.926,7.399,55.61,16.534,55.61,27.892l0,0v27.893c0,11.352-23.684,20.492-55.61,27.892l0,0C460.732,404.304,359.293,396.428,359.293,391.731"/>
+          <path fill="#DC322F" d="M359.293,335.946V252.27c0,6.973,223.138,20.919,223.138,55.784l0,0v83.677C582.431,356.866,359.293,342.92,359.293,335.946"/>
+          <path fill="#DC322F" d="M359.293,447.516v-83.677c0,6.973,223.138,20.92,223.138,55.785l0,0V503.3C582.431,468.434,359.293,454.488,359.293,447.516"/>
+          <path fill="#DC322F" d="M359.293,224.377V140.7c0,6.973,223.138,20.92,223.138,55.784l0,0v83.677C582.431,245.296,359.293,231.35,359.293,224.377"/>
+        </g>
+      </svg>
+      scalino
+    </a>
+    <nav class="navlinks">
+      <a href="#install">Install</a>
+      <a href="#action">In action</a>
+      <a href="#benefits">Benefits</a>
+      <a href="#editors">Editors</a>
+      <a href="#status">Status</a>
+    </nav>
+    <a class="navgh" href="https://github.com/lolgab/scalino" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</header>
+
+<div id="top"></div>
+<section class="hero wrap">
+  <span class="kicker">Scala 3 · self-hosted · zero JVM</span>
+  <h1>Scala 3, compiled straight<br>to <em>native</em>. No JVM. Ever.</h1>
+  <p class="lead">
+    <code class="mono">scalino</code> builds and runs Scala 3 straight to a native
+    executable via Scala Native — no bytecode, no JIT, no <code class="mono">java</code>
+    anywhere on the machine. The compiler, linker, and LSP server are themselves
+    self-hosted: compiled by dotc from their own patched source, targeting
+    Scala Native directly.
+  </p>
+  <div class="cta">
+    <a class="btn primary" href="#install">Install scalino</a>
+    <a class="btn ghost" href="https://github.com/lolgab/scalino" target="_blank" rel="noopener">View source</a>
+  </div>
+  <div class="installbar">
+    <code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/lolgab/scalino/main/install.sh <span class="muted">| bash</span></code>
+    <button class="copybtn" onclick="copyInstall(this)">Copy</button>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section id="install" class="wrap">
+  <p class="eyebrow">Install</p>
+  <h2>One line. No JVM to set up first.</h2>
+  <p class="section-sub">Grabs the latest release for your OS/arch, verifies its checksum, and installs
+    <code class="mono">scalino</code> to <code class="mono">~/.local/bin</code>. The only thing it expects
+    already on the machine is <code class="mono">clang</code> — every build links through it, even a
+    zero-dependency Hello World.</p>
+
+  <div class="tabs" id="install-tabs">
+    <button class="tab active" data-panel="i-curl">curl</button>
+    <button class="tab" data-panel="i-deb">Debian / Ubuntu</button>
+    <button class="tab" data-panel="i-rpm">Fedora / RHEL</button>
+    <button class="tab" data-panel="i-manual">Manual tarball</button>
+  </div>
+  <div class="panelwrap">
+    <div class="panel-head"><span>shell</span><span>scalino install</span></div>
+    <div class="panel active" id="i-curl"><pre><span class="cm"># installs to ~/.local/bin, verified checksum</span>
+curl -fsSL https://raw.githubusercontent.com/lolgab/scalino/main/install.sh | bash</pre></div>
+    <div class="panel" id="i-deb"><pre>curl -fsSLO https://github.com/lolgab/scalino/releases/download/vX.Y.Z/scalino_X.Y.Z_amd64.deb
+sudo apt install ./scalino_X.Y.Z_amd64.deb
+<span class="cm"># clang is wired in as a real package dependency</span></pre></div>
+    <div class="panel" id="i-rpm"><pre>sudo dnf install https://github.com/lolgab/scalino/releases/download/vX.Y.Z/scalino-X.Y.Z-1.x86_64.rpm
+<span class="cm"># installs to /usr/lib/scalino/, symlinked into /usr/bin/</span></pre></div>
+    <div class="panel" id="i-manual"><pre><span class="cm"># each release ships a self-contained dist/ tarball:</span>
+<span class="cm"># compiler + linker + scalino, for linux/macOS (x86_64+arm64)</span>
+<span class="cm"># and windows (x86_64, experimental)</span>
+./dist/scalino</pre></div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section id="action" class="wrap">
+  <p class="eyebrow">Scalino in action</p>
+  <h2>Shaped like scala-cli, on purpose.</h2>
+  <p class="section-sub">Same <code class="mono">//&gt; using</code> directives and flags as scala-cli —
+    <code class="mono">dep</code>, <code class="mono">-w</code>, <code class="mono">-o</code> — so
+    existing muscle memory carries straight over.</p>
+
+  <div class="tabs" id="action-tabs">
+    <button class="tab active" data-panel="a-hello">Run a file</button>
+    <button class="tab" data-panel="a-macro">Real macros</button>
+    <button class="tab" data-panel="a-deps">Dependencies</button>
+    <button class="tab" data-panel="a-watch">Watch mode</button>
+    <button class="tab" data-panel="a-compile">Compile a binary</button>
+    <button class="tab" data-panel="a-ide">Editor setup</button>
+  </div>
+  <div class="panelwrap">
+    <div class="panel-head"><span>scala</span><span id="action-file">Hello.scala</span></div>
+
+    <div class="panel active" id="a-hello"><pre><span class="kw">object</span> <span class="ty">Hello</span>:
+  <span class="kw">def</span> main(args: <span class="ty">Array</span>[<span class="ty">String</span>]): <span class="ty">Unit</span> = println(<span class="st">"hello from scalino"</span>)</pre>
+      <div class="note">$ scalino   <span class="cm">— run is the default command, no build step to think about</span></div></div>
+
+    <div class="panel" id="a-macro"><pre><span class="kw">import</span> scala.quoted.*
+
+<span class="kw">object</span> <span class="ty">Foo</span> {
+  <span class="kw">inline def</span> myMacro(): <span class="ty">Unit</span> = ${ aMacroImplementation }
+  <span class="kw">def</span> aMacroImplementation(<span class="kw">using</span> <span class="ty">Quotes</span>): <span class="ty">Expr</span>[<span class="ty">Unit</span>] = '{ println(<span class="st">"Hello"</span>) }
+}</pre>
+      <div class="note">$ scalino run <span class="cm">— expanded by scalino's own from-scratch TASTy tree interpreter, not JVM bytecode execution</span></div></div>
+
+    <div class="panel" id="a-deps"><pre><span class="cm">//&gt; using dep "com.github.plokhotnyuk.jsoniter-scala::jsoniter-scala-core::2.40.1"</span>
+<span class="cm">//&gt; using compileOnly.dep "com.github.plokhotnyuk.jsoniter-scala::jsoniter-scala-macros::2.40.1"</span>
+
+<span class="kw">import</span> com.github.plokhotnyuk.jsoniter_scala.macros.*
+<span class="kw">import</span> com.github.plokhotnyuk.jsoniter_scala.core.*
+
+<span class="kw">case class</span> User(name: <span class="ty">String</span>, devices: <span class="ty">Seq</span>[<span class="ty">Int</span>])
+<span class="kw">given</span> codec: <span class="ty">JsonValueCodec</span>[<span class="ty">User</span>] = <span class="ty">JsonCodecMaker</span>.make</pre>
+      <div class="note">Resolution shells out to a bundled, renamed coursier (<code class="mono">scalino-cs</code>) — no separate install, classpaths cached in <code class="mono">.scalino-build/</code>.</div></div>
+
+    <div class="panel" id="a-watch"><pre>scalino run -w</pre>
+      <div class="note">Rebuilds and reruns on save. Same flags as scala-cli: <code class="mono">--dep</code>, <code class="mono">-S/--scala</code>, <code class="mono">-O/--scalac-option</code>, <code class="mono">--main-class</code>, <code class="mono">-o/--output</code>.</div></div>
+
+    <div class="panel" id="a-compile"><pre>scalino compile -o hello
+./hello</pre>
+      <div class="note">A real, standalone native executable — no JVM, no bytecode, nothing to install on the machine that runs it.</div></div>
+
+    <div class="panel" id="a-ide"><pre>scalino setup-ide</pre>
+      <div class="note">Generates <code class="mono">.scalino-build/scalino-lsp.json</code>, then <code class="mono">dist/scalino-lsp</code> gives your editor diagnostics, hover, go-to-definition, references, and rename — without Metals' JVM dependency.</div></div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section id="benefits" class="wrap">
+  <p class="eyebrow">Benefits</p>
+  <h2>Why scalino, not scala-cli + a JVM.</h2>
+  <div class="benefits">
+    <div class="benefit"><div class="icon">0</div>
+      <h3>Zero JVM, top to bottom</h3>
+      <p>Compiler, linker, build tool, and LSP all ship as native executables. Nothing you run day to day touches <code class="mono">java</code>.</p></div>
+    <div class="benefit"><div class="icon">↺</div>
+      <h3>Self-hosted toolchain</h3>
+      <p>dotc compiles itself, targeting Scala Native directly — the compiler that builds your code was built the same way your code is.</p></div>
+    <div class="benefit"><div class="icon">${}</div>
+      <h3>Real macro execution</h3>
+      <p>Inline/quote macros run through a from-scratch TASTy tree interpreter, tested against real macro fixtures harvested from dotty's own suite.</p></div>
+    <div class="benefit"><div class="icon">$</div>
+      <h3>Familiar by design</h3>
+      <p>A mini scala-cli, shaped like the real one on purpose — same directives, same flags, same instinct for finding your entry point.</p></div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section id="editors" class="wrap">
+  <p class="eyebrow">Editor support</p>
+  <h2>Metals-inspired tooling, without Metals' JVM.</h2>
+  <p class="section-sub"><code class="mono">scalino-lsp</code> is self-hosted the same way as the compiler —
+    verified against a real native binary on a hand-written project, a real multi-package third-party
+    project, and end-to-end inside actual Zed.</p>
+  <div class="editors">
+    <div class="editor"><div class="glyph">Z</div><h4>Zed</h4><p>Published to Zed's extension gallery as "Scalino LSP"</p></div>
+    <div class="editor"><div class="glyph">▤</div><h4>VS Code</h4><p>Packaged in <code class="mono">vscode-extension/</code>, not yet on the Marketplace</p></div>
+    <div class="editor"><div class="glyph">⌘</div><h4>Neovim</h4><p><code class="mono">vim.lsp</code> client config, no plugin manager needed</p></div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section id="status" class="wrap">
+  <p class="eyebrow">Status</p>
+  <h2>Today vs. next.</h2>
+  <div class="status-grid">
+    <div class="statuscard">
+      <h3><span class="pill ok">Working</span> Compiler, linker, build tool</h3>
+      <ul>
+        <li>Scala 3 → NIR → native executable, end to end</li>
+        <li>Real inline/quote macros via the custom tree interpreter</li>
+        <li><code class="mono">scalino-lsp</code>: diagnostics, hover, go-to-definition, references, rename</li>
+        <li>Self-hosted since 2026-09-07 — zero JVM anywhere in the shipped binaries</li>
+      </ul>
+    </div>
+    <div class="statuscard">
+      <h3><span class="pill next">Next</span> Full editor support</h3>
+      <ul>
+        <li>General quote-pattern matching (<code class="mono">case '{ ... } =&gt;</code>) — the main known macro gap</li>
+        <li>VS Code Marketplace listing</li>
+        <li>Broader third-party library coverage cross-published for scala-native</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="footgrid">
+      <div class="footcol">
+        <h5>Project</h5>
+        <a href="https://github.com/lolgab/scalino" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/lolgab/scalino/releases" target="_blank" rel="noopener">Releases</a>
+        <a href="https://github.com/lolgab/scalino/blob/main/docs/findings.md" target="_blank" rel="noopener">Self-hosting findings</a>
+        <a href="https://github.com/lolgab/scalino/blob/main/LICENSE" target="_blank" rel="noopener">License (Apache 2.0)</a>
+      </div>
+      <div class="footcol">
+        <h5>Editors</h5>
+        <a href="https://github.com/lolgab/scalino/tree/main/zed-extension" target="_blank" rel="noopener">Zed extension</a>
+        <a href="https://github.com/lolgab/scalino/tree/main/vscode-extension" target="_blank" rel="noopener">VS Code extension</a>
+        <a href="https://github.com/lolgab/scalino/tree/main/neovim-extension" target="_blank" rel="noopener">Neovim config</a>
+      </div>
+      <div class="footcol">
+        <h5>Packaging</h5>
+        <a href="https://github.com/lolgab/scalino/blob/main/packaging/arch/PKGBUILD" target="_blank" rel="noopener">Arch (AUR)</a>
+        <a href="https://github.com/lolgab/scalino/blob/main/packaging/nix/flake.nix" target="_blank" rel="noopener">Nix flake</a>
+        <a href="https://github.com/lolgab/scalino/blob/main/packaging/homebrew/scalino.rb" target="_blank" rel="noopener">Homebrew formula</a>
+      </div>
+      <div class="footcol">
+        <h5>Builds on</h5>
+        <a href="https://github.com/scala/scala3" target="_blank" rel="noopener">Scala 3 (dotc)</a>
+        <a href="https://github.com/scala-native/scala-native" target="_blank" rel="noopener">Scala Native</a>
+        <a href="https://scala-cli.virtuslab.org/" target="_blank" rel="noopener">scala-cli (UX model)</a>
+      </div>
+    </div>
+    <div class="footbottom">
+      <span>scalino — Apache License 2.0</span>
+      <span>Compiler, linker &amp; LSP self-hosted on Scala Native. No JVM required.</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  function wireTabs(groupId, panelSelector){
+    var group = document.getElementById(groupId);
+    if(!group) return;
+    group.querySelectorAll('.tab').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        group.querySelectorAll('.tab').forEach(function(b){ b.classList.remove('active'); });
+        btn.classList.add('active');
+        var wrap = group.nextElementSibling;
+        wrap.querySelectorAll('.panel').forEach(function(p){ p.classList.remove('active'); });
+        var target = wrap.querySelector('#' + btn.dataset.panel);
+        if(target) target.classList.add('active');
+        var head = wrap.querySelector('#action-file');
+        if(head) head.textContent = btn.textContent.trim();
+      });
+    });
+  }
+  wireTabs('install-tabs');
+  wireTabs('action-tabs');
+
+  function copyInstall(btn){
+    var text = 'curl -fsSL https://raw.githubusercontent.com/lolgab/scalino/main/install.sh | bash';
+    navigator.clipboard.writeText(text).then(function(){
+      var old = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(function(){ btn.textContent = old; }, 1500);
+    });
+  }
+</script>
+</body>
+</html>
