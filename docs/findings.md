@@ -166,18 +166,19 @@ compilations.
 
 **Test fixtures**: `interpreter/test-fixtures/` holds real macro tests
 harvested from `vendor/scala3/tests/{run-macros,pos-macros}`. Of the curated
-set: 7 pass correctly end-to-end (including through the actual `scalino-dotc`
+set: 9 pass correctly end-to-end (including through the actual `scalino-dotc`
 + `scalino-linkdriver` binaries, not just a JVM test harness — see
-`examples/macro-hello/`), 1 (`i10863`) partially passes (resolves the right
-value but `.show` renders through dotc's own pretty-printer rather than the
-exact printer real macros get, so output differs in detail), and 2
-(`i7715`, `i8746`) fail cleanly with a named `StopInterpretation` rather than
-a crash or wrong answer, because they need general quote-pattern matching.
+`examples/macro-hello/`; this now includes `i7715`/`i8746`, see "General
+quote-pattern matching" below), and 1 (`i10863`) partially passes (resolves
+the right value but `.show` renders through dotc's own pretty-printer rather
+than the exact printer real macros get, so output differs in detail).
 
 **Known gaps** (see the `Interpreter` class doc comment for specifics):
-- General pattern matching (`UnApply` — case-class deconstruction, quote
-  patterns like `case '{ $body } => ...`) isn't implemented. `matchPattern`
-  only covers wildcards, binds, literals, typed-wildcard type tests.
+- Structural quote-*type* patterns beyond a bare type variable (e.g.
+  `case '[List[t]] => ...`, as opposed to `case '[t] => ...`) aren't
+  implemented. Quote-*expr* patterns (`case '{ ... } => ...`) and general
+  `UnApply` (case-class deconstruction) are both covered — see "General
+  quote-pattern matching" below.
 - `Tree#show` uses dotc's default printer, not the exact printer real macros
   get by default (`reflect.Printer.TreeCode`) — correct interpretation, but
   detail-level string differences are possible.
@@ -808,9 +809,28 @@ serially.
 
 ## Remaining work
 
-1. **General quote-pattern matching.** The biggest real gap — see
-   `i7715`/`i8746` above. Needed for a large class of real-world macros
-   (typeclass derivation, anything using `case '{ ... } => ` matching).
+1. ~~**General quote-pattern matching.**~~ Fixed (2026-09-17):
+   `matchQuoteBodyTree` (`Interpreter.scala`) now handles lambda-shaped quote
+   bodies (`case '{ (x: T) => ... } => ...`, via dotc's own `closureDef`
+   extractor, with pattern-param-to-scrutinee-param aliasing so a body
+   reference to the pattern's own param matches correctly) and a
+   brace-wrapped single-expression body (`Block(Nil, expr)`, which every
+   lambda/`{ ... }`-bodied sub-position can produce on either side
+   independently). `i7715`/`i8746` (the two fixtures this gap was blocking)
+   now both compile, link, and run correctly end to end — verified via the
+   JVM-based `dotty.tools.dotc.Main` fast-iteration path (recompile
+   `Interpreter.scala` alone against the published `scala3-compiler_3` jar,
+   splice the result into a copy of that jar, compile+run each fixture's
+   `Macro_1.scala` then `Test_2.scala` against it with `-Yretain-trees`),
+   with a broad regression pass across every other separate-compilation
+   fixture (`i4515`, `i4515b`, `i10863`, `inline-varargs-1`,
+   `macros-in-same-project1`, `tasty-getfile`) confirming no regressions.
+   General `UnApply`/case-class deconstruction was *already* handled by an
+   earlier session's `callUserDefDef` fallback (see the utest work above) —
+   between the two, "general quote-pattern matching" as a category is
+   closed; the one remaining quote-pattern gap is structural quote-*type*
+   patterns beyond a bare type variable (`case '[List[t]] => ...`), tracked
+   separately in the `Interpreter` class doc comment's "Known gaps".
 2. **Full sbt source build.** Current patching approach (recompile one file,
    splice into the published jar) only works for single-file, dependency-only
    patches. Anything touching multiple compiler files, or needing non-public

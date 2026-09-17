@@ -1,5 +1,5 @@
 diff --git a/compiler/src/dotty/tools/dotc/quoted/Interpreter.scala b/compiler/src/dotty/tools/dotc/quoted/Interpreter.scala
-index 04cb637b..1fbe6a53 100644
+index 04cb637b..df414807 100644
 --- a/compiler/src/dotty/tools/dotc/quoted/Interpreter.scala
 +++ b/compiler/src/dotty/tools/dotc/quoted/Interpreter.scala
 @@ -1,6 +1,7 @@
@@ -10,7 +10,7 @@ index 04cb637b..1fbe6a53 100644
  import scala.collection.mutable
  import scala.reflect.ClassTag
  
-@@ -25,24 +26,109 @@ import dotty.tools.dotc.quoted.*
+@@ -25,24 +26,112 @@ import dotty.tools.dotc.quoted.*
  import dotty.tools.dotc.typer.ImportInfo.withRootImports
  import dotty.tools.dotc.util.SrcPos
  import dotty.tools.dotc.reporting.Message
@@ -63,12 +63,15 @@ index 04cb637b..1fbe6a53 100644
 + *  (`Macro_1.scala`/`Test_2.scala`-style) tests from upstream's own suite.
 + *
 + *  ==Known gaps==
-+ *  - **General pattern matching against non-trivial patterns** (`UnApply`,
-+ *    e.g. case-class deconstruction or quote patterns like
-+ *    `case '{ $body } => ...}`) is not implemented -- `matchPattern` only
-+ *    covers wildcards, binds, literals, and typed-wildcard type tests. Hit a
-+ *    clear `StopInterpretation` naming the unsupported pattern shape, not a
-+ *    silent wrong answer. See `interpreter/test-fixtures/{i7715,i8746}`.
++ *  - **Structural quote-TYPE patterns** beyond a bare type variable (e.g.
++ *    `case '[List[t]] => ...`, as opposed to `case '[t] => ...`) are not
++ *    implemented -- only expr quote patterns (`case '{ ... } => ...`, see
++ *    `matchQuoteBody`/`matchQuoteBodyTree`, including lambda-shaped bodies)
++ *    and general `UnApply` (case-class deconstruction, via either a curated
++ *    extractor or the `callUserDefDef` fallback) are covered. Hit a clear
++ *    `StopInterpretation` naming the unsupported pattern shape, not a
++ *    silent wrong answer. (`interpreter/test-fixtures/{i7715,i8746}` exercise
++ *    expr quote patterns, including a lambda-shaped one -- both now pass.)
 + *  - The `scala.quoted`/`Quotes` API surface is covered by hand as specific
 + *    cases get exercised (see `interpretQuotesApi`), not exhaustively --
 + *    expect to add more as more macro shapes are tried.
@@ -127,7 +130,7 @@ index 04cb637b..1fbe6a53 100644
    /** Returns the result of interpreting the code in the tree.
     *  Return Some of the result or None if the result type is not consistent with the expected type.
     *  Throws a StopInterpretation if the tree could not be interpreted or a runtime exception occurred.
-@@ -59,43 +145,350 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
+@@ -59,43 +148,350 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
    /** Returns the result of interpreting the code in the tree.
     *  Throws a StopInterpretation if the tree could not be interpreted or a runtime exception occurred.
     */
@@ -487,7 +490,7 @@ index 04cb637b..1fbe6a53 100644
      // Interpret `foo(j = x, i = y)` which it is expanded to
      // `val j$1 = x; val i$1 = y; foo(i = i$1, j = j$1)`
      case Block(stats, expr) => interpretBlock(stats, expr)
-@@ -113,6 +506,19 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
+@@ -113,6 +509,19 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
        unexpectedTree(tree)
    }
  
@@ -507,7 +510,7 @@ index 04cb637b..1fbe6a53 100644
    private def interpretArgs(argss: List[List[Tree]], fnType: Type)(using Env): List[Object] = {
      def interpretArgsGroup(args: List[Tree], argTypes: List[Type]): List[Object] =
        assert(args.size == argTypes.size)
-@@ -141,189 +547,4358 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
+@@ -141,189 +550,4401 @@ class Interpreter(pos: SrcPos, classLoader0: ClassLoader)(using Context):
          Nil
    }
  
@@ -607,10 +610,12 @@ index 04cb637b..1fbe6a53 100644
 +      else None
 +    }
 +
-+  /** Best-effort structural pattern matcher. Supports exactly what the
-+   *  curated macro test-fixtures need: wildcards, binds, literals, and
-+   *  typed-wildcard type tests. General `UnApply` (case-class deconstruction,
-+   *  quote patterns) is not yet implemented.
++  /** Best-effort structural pattern matcher: wildcards, binds, literals,
++   *  typed-wildcard type tests, quote patterns (`matchQuoteBody`, including
++   *  lambda-shaped bodies via `closureDef`), and `UnApply` -- either a
++   *  curated well-known extractor, or (see `callUserDefDef` below) a
++   *  general fallback that interprets the extractor's own retained
++   *  `unapply`/`unapplySeq` body.
 +   */
 +  private def matchPattern(pat: Tree, scrutinee: Object, bindingSyms: Set[Symbol] = Set.empty)(using env: Env): Option[Env] = pat match
 +    case Ident(nme.WILDCARD) => Some(env)
@@ -1292,7 +1297,43 @@ index 04cb637b..1fbe6a53 100644
 +      case e: scala.quoted.runtime.impl.ExprImpl => matchQuoteBodyTree(pat, stripInlined(e.tree), e.scope, bindingSyms)
 +      case _ => None
 +
-+  private def matchQuoteBodyTree(pat: Tree, scrutTree: Tree, scope: scala.quoted.runtime.impl.Scope, bindingSyms: Set[Symbol])(using env: Env): Option[Env] = pat match
++  private def matchQuoteBodyTree(pat: Tree, scrutTree: Tree, scope: scala.quoted.runtime.impl.Scope, bindingSyms: Set[Symbol], termAliases: Map[Symbol, Symbol] = Map.empty)(using env: Env): Option[Env] =
++    if debugMatchEnabled then
++      Console.err.println(s"[matchQuoteBodyTree] pat=${pat.getClass.getSimpleName}(${pat.show}) scrutTree=${scrutTree.getClass.getSimpleName}(${scrutTree.show})")
++    pat match
++    case Block(Nil, patExpr) =>
++      // A single-expression body written with braces (e.g. a lambda's
++      // `{ ${out}: tpe2 }`, or any other quote-pattern sub-position written
++      // the same way) types as a trivial `Block(Nil, expr)`, wrapping an
++      // otherwise-ordinary shape (`SplicePattern`/`Apply`/... ) that the
++      // cases below already know how to match -- strip it symmetrically
++      // (the scrutinee side need not ALSO be brace-wrapped, e.g. a
++      // single-statement lambda body vs. a multi-statement one that
++      // happens to reduce to one real stat) before dispatching.
++      val scrutExpr = scrutTree match { case Block(Nil, e) => e; case _ => scrutTree }
++      matchQuoteBodyTree(patExpr, scrutExpr, scope, bindingSyms, termAliases)
++    case closureDef(patDef) =>
++      // `case '{ (in: String) => ... } =>` (a lambda quote pattern, e.g.
++      // real `FromExpr`-adjacent macros matching an `Expr[A => B]` shape
++      // directly, or typeclass-derivation macros pattern-matching a
++      // user-supplied function literal) -- both pattern and scrutinee are
++      // ordinary `(x1, ..., xn) => body` trees, which desugar to the same
++      // `Block(List(DefDef(...)), Closure(...))` shape on both sides
++      // (`closureDef` is dotc's own extractor for exactly this, already
++      // used throughout the rest of this compiler). Only same-arity
++      // lambdas can possibly match; each pattern param is aliased to its
++      // corresponding scrutinee param (by POSITION, not by symbol, since
++      // they're two independently-bound variables) so a body reference to
++      // the pattern's own param (e.g. `case '{ (in: String) => foo(in) }`)
++      // still matches the scrutinee's differently-named/differently-symbol'd
++      // param instead of failing on a spurious symbol mismatch, the same
++      // way the `Select`/leaf cases below already fall back to symbol
++      // identity for a reference that isn't itself part of the pattern.
++      scrutTree match
++        case closureDef(scrutDef) if patDef.termParamss.map(_.size) == scrutDef.termParamss.map(_.size) =>
++          val newAliases = termAliases ++ patDef.termParamss.flatten.map(_.symbol).zip(scrutDef.termParamss.flatten.map(_.symbol))
++          matchQuoteBodyTree(patDef.rhs, scrutDef.rhs, scope, bindingSyms, newAliases)
++        case _ => None
 +    case sp @ SplicePattern(subPat, _, _) =>
 +      // A splice pattern's own type ascription (e.g. the `Encoder[h]` in
 +      // `'{ $head: Encoder[h] }`) is NOT a separate `Typed` node anywhere in
@@ -1316,7 +1357,7 @@ index 04cb637b..1fbe6a53 100644
 +      }
 +    case Typed(patExpr, _) =>
 +      val scrutExpr = scrutTree match { case Typed(e, _) => e; case _ => scrutTree }
-+      matchQuoteBodyTree(patExpr, scrutExpr, scope, bindingSyms)
++      matchQuoteBodyTree(patExpr, scrutExpr, scope, bindingSyms, termAliases)
 +    case New(patTpt) =>
 +      // `case '{ new StringContext(...) } =>` (real scala-library
 +      // `FromExpr[StringContext]`'s own pattern, `FromExpr.scala:143` --
@@ -1327,20 +1368,20 @@ index 04cb637b..1fbe6a53 100644
 +      // case below would compare two `NoSymbol`s and always fail --
 +      // recurse into `tpt` instead, whose real class symbol IS meaningful.
 +      scrutTree match
-+        case New(scrutTpt) => matchQuoteBodyTree(patTpt, scrutTpt, scope, bindingSyms)
++        case New(scrutTpt) => matchQuoteBodyTree(patTpt, scrutTpt, scope, bindingSyms, termAliases)
 +        case _ => None
 +    case Apply(patFn, patArgs) =>
 +      scrutTree match
 +        case Apply(scrutFn, scrutArgs) if patArgs.size == scrutArgs.size =>
-+          matchQuoteBodyTree(patFn, scrutFn, scope, bindingSyms).flatMap { e1 =>
++          matchQuoteBodyTree(patFn, scrutFn, scope, bindingSyms, termAliases).flatMap { e1 =>
 +            patArgs.zip(scrutArgs).foldLeft(Option(e1)) { (eOpt, pv) =>
-+              eOpt.flatMap(e => matchQuoteBodyTree(pv._1, pv._2, scope, bindingSyms)(using e))
++              eOpt.flatMap(e => matchQuoteBodyTree(pv._1, pv._2, scope, bindingSyms, termAliases)(using e))
 +            }
 +          }
 +        case _ => None
 +    case Select(patQual, patName) =>
 +      scrutTree match
-+        case Select(scrutQual, scrutName) if patName == scrutName => matchQuoteBodyTree(patQual, scrutQual, scope, bindingSyms)
++        case Select(scrutQual, scrutName) if patName == scrutName => matchQuoteBodyTree(patQual, scrutQual, scope, bindingSyms, termAliases)
 +        // The scrutinee isn't ALSO a `Select` of the same shape (e.g. a
 +        // plain `Ident` instead, printed WITH a qualifier prefix purely for
 +        // disambiguation, not because it's really a multi-hop `Select`
@@ -1351,11 +1392,16 @@ index 04cb637b..1fbe6a53 100644
 +        // back to whole-reference symbol identity (same as the leaf case
 +        // below) rather than failing outright on a structural mismatch
 +        // that doesn't reflect a real difference.
-+        case _ => if pat.symbol.exists && pat.symbol == scrutTree.symbol then Some(env) else None
++        case _ => if pat.symbol.exists && matchesSymbol(pat.symbol, scrutTree.symbol, termAliases) then Some(env) else None
 +    case _ =>
-+      // A leaf reference (e.g. `StringContext`'s own `Ident`/module select):
-+      // match by symbol identity, not structurally.
-+      if pat.symbol.exists && pat.symbol == scrutTree.symbol then Some(env) else None
++      // A leaf reference (e.g. `StringContext`'s own `Ident`/module select,
++      // or a reference to one of an enclosing `closureDef` pattern's own
++      // params -- see `termAliases` above): match by symbol identity (or by
++      // alias, for a pattern-bound lambda param), not structurally.
++      if pat.symbol.exists && matchesSymbol(pat.symbol, scrutTree.symbol, termAliases) then Some(env) else None
++
++  private def matchesSymbol(patSym: Symbol, scrutSym: Symbol, termAliases: Map[Symbol, Symbol]): Boolean =
++    patSym == scrutSym || termAliases.get(patSym).contains(scrutSym)
 +
 +  /** Structurally unifies a splice pattern's type ascription (e.g. `Encoder[h]`,
 +   *  `Encoder[EmptyTuple]`, `Encoder[ht *: t]`) against the scrutinee
@@ -2244,7 +2290,22 @@ index 04cb637b..1fbe6a53 100644
 +      // outer already claimed.
 +      cls.asClass.baseClasses.foldLeft(withOwner)((e, base) => if e.contains(base) then e else e.updated(base, value))
 +    else withOwner
-+
+ 
+-  private def loadClass(name: String): Class[?] =
+-    try classLoader.loadClass(name)
+-    catch
+-      case MissingClassValidInCurrentRun(sym, origin) =>
+-        suspendOnMissing(sym, origin, pos)
+-
+-
+-  private def getMethod(clazz: Class[?], name: Name, paramClasses: List[Class[?]]): JLRMethod =
+-    try clazz.getMethod(name.toString, paramClasses*)
+-    catch {
+-      case _: NoSuchMethodException =>
+-        val msg = em"Could not find method ${clazz.getCanonicalName}.$name with parameters ($paramClasses%, %)"
+-        throw new StopInterpretation(msg, pos)
+-      case MissingClassValidInCurrentRun(sym, origin) =>
+-        suspendOnMissing(sym, origin, pos)
 +  /** A handful of mutable stdlib collection classes constructed directly as
 +   *  real host objects instead of via `interpretNew`'s tree-walking (their
 +   *  own constructors/methods are library bytecode with no retained defTree
@@ -2840,22 +2901,7 @@ index 04cb637b..1fbe6a53 100644
 +        if root.isEmpty then tpd.EmptyTree
 +        else findDefTree(root, sym).getOrElse(tpd.EmptyTree)
 +      else tpd.EmptyTree
- 
--  private def loadClass(name: String): Class[?] =
--    try classLoader.loadClass(name)
--    catch
--      case MissingClassValidInCurrentRun(sym, origin) =>
--        suspendOnMissing(sym, origin, pos)
--
--
--  private def getMethod(clazz: Class[?], name: Name, paramClasses: List[Class[?]]): JLRMethod =
--    try clazz.getMethod(name.toString, paramClasses*)
--    catch {
--      case _: NoSuchMethodException =>
--        val msg = em"Could not find method ${clazz.getCanonicalName}.$name with parameters ($paramClasses%, %)"
--        throw new StopInterpretation(msg, pos)
--      case MissingClassValidInCurrentRun(sym, origin) =>
--        suspendOnMissing(sym, origin, pos)
++
 +  /** Searches a whole-compilation-unit tree (from `rootTreeContaining`) for
 +   *  the `DefDef`/`ValDef` defining `target`, descending through packages,
 +   *  nested classes/objects (`Template.constr` for the primary constructor,

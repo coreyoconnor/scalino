@@ -121,8 +121,11 @@ The core toolchain — Scala 3 → NIR → native executable — works end to en
 including real inline/quote macros: macro expansion runs through a
 from-scratch TASTy-tree interpreter instead of dotc's normal
 bytecode-execution path, tested against real macro fixtures harvested from
-upstream's own test suite. Not every macro shape is supported yet — general
-quote-pattern matching (`case '{ ... } => `) is the main known gap. Full
+upstream's own test suite. Not every macro shape is supported yet — the main
+remaining known gap is structural quote-*type* patterns beyond a bare type
+variable (e.g. `case '[List[t]] => `, as opposed to `case '[t] => `); general
+quote-*expr* pattern matching (`case '{ ... } => `, including lambda-shaped
+bodies) and case-class/`UnApply` deconstruction are both supported. Full
 verified/blocked/remaining breakdown in [`docs/findings.md`](docs/findings.md).
 
 The LSP server works too, and as of 2026-09-07 is self-hosted the same way
