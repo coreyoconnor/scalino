@@ -1,5 +1,5 @@
 {
-  "version": "0.0.7",
-  "linux-x86_64": { "sha256": "214231c557671129808b2d1f5266b3b24765146dd586cdd44d88f0dd451e6d16" },
-  "linux-arm64":  { "sha256": "71e4adb05124e86000e22b2fb8121f5a79c436af3eda56ebbbf2a92be40952c9" }
+  "version": "0.0.8",
+  "linux-x86_64": { "sha256": "249b65aa3b9773253f75586eb6c111f8f33caaa284b3827dda39a952fbe34da5" },
+  "linux-arm64":  { "sha256": "6b61d9cf0563bb3378afee2e651b66bd38bec730c1dafbfbd4427ecf34c088b0" }
 }
