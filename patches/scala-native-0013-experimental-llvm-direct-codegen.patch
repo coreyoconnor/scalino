@@ -1999,6 +1999,33 @@ index 30cf99d..459efde 100644
            | - multithreading           ${multithreading.getOrElse("detect")}
            | - linktimeProperties:      ${showMap(linktimeProperties)}
            | - embedResources:          $embedResources
+diff --git a/tools/src/main/scala/scala/scalanative/build/ScalaNative.scala b/tools/src/main/scala/scala/scalanative/build/ScalaNative.scala
+index a6a7877..dd25e7c 100644
+--- a/tools/src/main/scala/scala/scalanative/build/ScalaNative.scala
++++ b/tools/src/main/scala/scala/scalanative/build/ScalaNative.scala
+@@ -237,7 +237,21 @@ private[scalanative] object ScalaNative {
+         .flatMap(Future.sequence(_))
+         .andThen {
+           case Success(paths) =>
+-            config.logger.info(s"Produced ${paths.length} LLVM IR files")
++            // useLLVMDirectCodeGen (CodeGen.scala) makes some/all of these
++            // straight-to-object-file, not the old always-.ll path -- report
++            // what was actually produced instead of a hardcoded "LLVM IR
++            // files" that's wrong (0 of them) once direct codegen covers a
++            // whole build.
++            val llCount = paths.count(_.toString.endsWith(".ll"))
++            val objCount = paths.length - llCount
++            val message =
++              if (llCount == 0)
++                s"Produced ${paths.length} object files (direct codegen)"
++              else if (objCount == 0)
++                s"Produced ${paths.length} LLVM IR files"
++              else
++                s"Produced $objCount object files (direct codegen) and $llCount LLVM IR files"
++            config.logger.info(message)
+         }
+     }
+     codeGen
 diff --git a/tools/src/main/scala/scala/scalanative/build/Validator.scala b/tools/src/main/scala/scala/scalanative/build/Validator.scala
 index 1e5c281..fb07c8a 100644
 --- a/tools/src/main/scala/scala/scalanative/build/Validator.scala
