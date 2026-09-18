@@ -21,9 +21,23 @@ runs:
       shell: bash
       run: |
         sudo apt-get update -y
-        sudo apt-get install -y clang
+        # llvm-dev pulls in llvm-config + libLLVM-*.so: the direct LLVM-C
+        # codegen backend is on by default (build/04-build-scalino-linkdriver.sh),
+        # so scalino-linkdriver itself needs libLLVM at link time, not just
+        # clang -- without it the link fails with "undefined reference to
+        # LLVMFunctionType" etc.
+        sudo apt-get install -y clang llvm-dev
 
-    # macOS runners ship Xcode command line tools (clang/clang++) already.
+    - name: Install llvm-config/libLLVM (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        # Xcode command line tools ship clang/clang++ already, but not
+        # llvm-config/libLLVM -- the direct LLVM-C codegen backend is on by
+        # default (build/04-build-scalino-linkdriver.sh), so
+        # scalino-linkdriver needs libLLVM at link time.
+        brew install llvm
+        echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
 
     - name: Locate clang (Windows)
       if: runner.os == 'Windows'

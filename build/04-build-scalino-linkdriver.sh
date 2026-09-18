@@ -59,16 +59,13 @@ LINK_WORK="$WORK/driver-link"
 rm -rf "$LINK_WORK"
 mkdir -p "$LINK_WORK"
 
-# EXPERIMENTAL (NativeConfig.useLLVMDirectCodeGen): best-effort, optional --
-# if a compatible libLLVM is discoverable, link it straight into
-# scalino-linkdriver itself so the @extern LLVM-C bindings compiled into its
-# NIR (tools/native/.../codegen/llvm/direct/LLVMCApi.scala) resolve. This is
-# separate from -- and does not require -- the flag actually being passed to
-# *this* bootstrap build (which always runs the JVM-hosted tools_3, where the
-# feature is a no-op); it only affects whether the resulting binary can use
-# the feature later, at real `scalino build --experimental-direct-codegen`
-# time. Never fails the build: if llvm-config/libLLVM aren't found, or the
-# version is too old, the flag stays silently unavailable at runtime.
+# NativeConfig's direct LLVM-C codegen backend is now ON BY DEFAULT (see
+# tools-patched), which means the tools_3 link step invoked below -- linking
+# scalino-linkdriver itself, not just a later `scalino build` -- pulls in the
+# @extern LLVM-C bindings (tools/native/.../codegen/llvm/direct/LLVMCApi.scala)
+# and needs libLLVM at link time, unconditionally. This is no longer optional:
+# without it, the LinkDriver step below fails with cryptic
+# "undefined reference to LLVMFunctionType" linker errors.
 LLVM_DIRECT_CODEGEN_LINKING_OPTS=()
 if command -v llvm-config >/dev/null 2>&1; then
   LLVM_CONFIG_VERSION="$(llvm-config --version 2>/dev/null || true)"
@@ -90,7 +87,8 @@ if command -v llvm-config >/dev/null 2>&1; then
   fi
 fi
 if [[ "${#LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]}" -eq 0 ]]; then
-  echo "  useLLVMDirectCodeGen: no compatible libLLVM found, feature will be unavailable at runtime (this is fine, it's opt-in)"
+  echo "no usable llvm-config/libLLVM (>= 13) found on PATH -- required to link scalino-linkdriver since direct LLVM-C codegen is on by default. Install e.g. 'llvm-dev' (Debian/Ubuntu) or 'llvm' (Homebrew) and ensure llvm-config is on PATH." >&2
+  exit 1
 fi
 
 "$JAVA" \
