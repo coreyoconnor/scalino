@@ -49,10 +49,10 @@ index 0000000..6f953b0
 +}
 diff --git a/tools/native/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGen.scala b/tools/native/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGen.scala
 new file mode 100644
-index 0000000..81aab6e
+index 0000000..a39a800
 --- /dev/null
 +++ b/tools/native/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGen.scala
-@@ -0,0 +1,1194 @@
+@@ -0,0 +1,1210 @@
 +package scala.scalanative
 +package codegen
 +package llvm
@@ -413,9 +413,25 @@ index 0000000..81aab6e
 +    }
 +  }
 +
++  // Always attaches a location when debug info is on -- even for a
++  // synthetic/undefined-position inst (line 0, col 0, a real LLVM convention
++  // for "no source line but still in scope") -- never leaves the builder's
++  // current debug location unset/stale. A stale location matters here
++  // because buildLandingPad's `LLVMBuildCall2`s (__cxa_begin_catch and
++  // friends) run under whatever location this last set, positioned into
++  // blocks of their own; if the very first inst this function ever calls it
++  // for has an undefined pos (real for compiler-synthesized code), skipping
++  // the set left the builder's location at its initial null -- and a call in
++  // a function that has debug info (LLVMSetSubprogram was called) must carry
++  // a !dbg location, or LLVM's verifier rejects the whole module with
++  // "inlinable function call in a function with debug info must have a !dbg
++  // location" -- which used to silently fall the WHOLE partition back to
++  // .ll+clang (DirectCodeGen.emit's catch-all NonFatal handler).
 +  private def setDebugLoc(builder: LLVMBuilderRef, scope: LLVMMetadataRef, pos: nir.SourcePosition): Unit =
-+    if (debugInfoEnabled && pos.isDefined) {
-+      val loc = DI.LLVMDIBuilderCreateDebugLocation(ctx, pos.sourceLine.toUInt, pos.sourceColumn.toUInt, scope, null)
++    if (debugInfoEnabled) {
++      val line = if (pos.isDefined) pos.sourceLine.toUInt else 0.toUInt
++      val col = if (pos.isDefined) pos.sourceColumn.toUInt else 0.toUInt
++      val loc = DI.LLVMDIBuilderCreateDebugLocation(ctx, line, col, scope, null)
 +      DI.LLVMSetCurrentDebugLocation2(builder, loc)
 +    }
 +
@@ -2011,7 +2027,7 @@ index 1e5c281..fb07c8a 100644
        case Nil    => config
        case issues =>
 diff --git a/tools/src/main/scala/scala/scalanative/codegen/llvm/CodeGen.scala b/tools/src/main/scala/scala/scalanative/codegen/llvm/CodeGen.scala
-index 325c5ec..6227fff 100644
+index 325c5ec..7bc5df0 100644
 --- a/tools/src/main/scala/scala/scalanative/codegen/llvm/CodeGen.scala
 +++ b/tools/src/main/scala/scala/scalanative/codegen/llvm/CodeGen.scala
 @@ -13,6 +13,7 @@ import scala.scalanative.build
@@ -2107,6 +2123,16 @@ index 325c5ec..6227fff 100644
            separateIncrementally()
          else separate()
        llvmIRGenerators ++ maybeBuildInfoGenerator
+@@ -201,7 +258,8 @@ object CodeGen {
+           dir: VirtualDirectory,
+           config: build.Config
+       ): Option[Path] =
+-        if (config.targetsLinux) Some(gen("", dir))
++        if (config.targetsLinux && !config.compilerConfig.useLLVMDirectCodeGen)
++          Some(gen("", dir))
+         else None
+ 
+       override def gen(unused: String, dir: VirtualDirectory): Path = {
 diff --git a/tools/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGenPlan.scala b/tools/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGenPlan.scala
 new file mode 100644
 index 0000000..2499f4b
