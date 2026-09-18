@@ -224,7 +224,7 @@ object ScalinoCli:
     nativeTarget: Option[String],
     nativeEmbedResources: Option[Boolean],
     nativeMultithreading: Option[Boolean],
-    nativeExperimentalDirectCodegen: Option[Boolean],
+    nativeDirectCodegen: Option[Boolean],
     jars: List[String],
     testOptions: List[String],
     resourceDirs: List[String],
@@ -248,7 +248,7 @@ object ScalinoCli:
     "repository", "repositories", "file", "files", "exclude",
     "nativeMode", "nativeGc", "nativeLto", "nativeClang", "nativeClangPP", "nativeClangPp",
     "nativeLinking", "nativeCompile", "nativeCCompile", "nativeCppCompile", "nativeTarget",
-    "nativeEmbedResources", "nativeMultithreading", "nativeExperimentalDirectCodegen"
+    "nativeEmbedResources", "nativeMultithreading", "nativeDirectCodegen"
     // deliberately NOT "nativeVersion": this toolchain only ever targets the
     // one pinned scala-native version it was built for (see the "scala"
     // directive's own version-mismatch warning below for the same reason) --
@@ -303,7 +303,7 @@ object ScalinoCli:
     var nativeTarget = Option.empty[String]
     var nativeEmbedResources = Option.empty[Boolean]
     var nativeMultithreading = Option.empty[Boolean]
-    var nativeExperimentalDirectCodegen = Option.empty[Boolean]
+    var nativeDirectCodegen = Option.empty[Boolean]
     var jars = List.empty[String]
     var testOptions = List.empty[String]
     var resourceDirs = List.empty[String]
@@ -347,12 +347,12 @@ object ScalinoCli:
         directiveValues(line, "nativeTarget").foreach(_.headOption.foreach(v => nativeTarget = Some(v)))
         directiveBool(line, "nativeEmbedResources").foreach(v => nativeEmbedResources = Some(v))
         directiveBool(line, "nativeMultithreading").foreach(v => nativeMultithreading = Some(v))
-        directiveBool(line, "nativeExperimentalDirectCodegen").foreach(v => nativeExperimentalDirectCodegen = Some(v))
+        directiveBool(line, "nativeDirectCodegen").foreach(v => nativeDirectCodegen = Some(v))
     Directives(
       deps.distinct, compileOnlyDeps.distinct, testDeps.distinct, scalaVersion, mainClass, options, testFramework,
       nativeMode, nativeGc, nativeLto, nativeClang, nativeClangPP,
       nativeLinking, nativeCompile, nativeCCompile, nativeCppCompile,
-      nativeTarget, nativeEmbedResources, nativeMultithreading, nativeExperimentalDirectCodegen,
+      nativeTarget, nativeEmbedResources, nativeMultithreading, nativeDirectCodegen,
       jars.distinct, testOptions, resourceDirs.distinct, repositories.distinct
     )
 
@@ -1588,7 +1588,7 @@ object ScalinoCli:
     target: Option[String] = None,
     embedResources: Boolean = false,
     multithreading: Boolean = true,
-    experimentalDirectCodegen: Boolean = true,
+    directCodegen: Boolean = true,
     linking: List[String] = Nil,
     compile: List[String] = Nil,
     cCompile: List[String] = Nil,
@@ -1608,19 +1608,19 @@ object ScalinoCli:
       clangpp = directives.nativeClangPP.orElse(o.cliNativeClangpp),
       target = directives.nativeTarget.orElse(o.cliNativeTarget),
       embedResources = directives.nativeEmbedResources.getOrElse(false) || o.cliEmbedResources,
-      // Default-on, same opt-out shape as experimentalDirectCodegen above:
+      // Default-on, same opt-out shape as directCodegen above:
       // either source wins outright over the default if given explicitly.
       multithreading = directives.nativeMultithreading.orElse(o.cliNativeMultithreading).getOrElse(true),
       // Default-on everywhere except Windows (DirectCodeGen.Capability.
       // wholeBuildGatesOk gates out Windows permanently -- WindowsCompat is
       // unported), with an explicit opt-out via the directive or
-      // `--native-experimental-direct-codegen=false` -- either one, if
-      // given, wins outright over the OS-based default. No cross-compilation
+      // `--native-direct-codegen=false` -- either one, if given,
+      // wins outright over the OS-based default. No cross-compilation
       // support exists in scalino today, so the *host* OS doubles as the
       // target OS here, same pragmatic assumption `Discover`'s other
       // OS-sniffing already makes.
-      experimentalDirectCodegen = directives.nativeExperimentalDirectCodegen
-        .orElse(o.cliNativeExperimentalDirectCodegen)
+      directCodegen = directives.nativeDirectCodegen
+        .orElse(o.cliNativeDirectCodegen)
         .getOrElse(!sys.props.getOrElse("os.name", "").toLowerCase.startsWith("windows")),
       linking = directives.nativeLinking ++ o.cliNativeLinking,
       compile = directives.nativeCompile ++ o.cliNativeCompile,
@@ -1675,7 +1675,7 @@ object ScalinoCli:
       nativeOpts.target.toList.flatMap(v => List("--target", v)) ++
       (if nativeOpts.embedResources then List("--embed-resources") else Nil) ++
       (if nativeOpts.multithreading then List("--multithreading") else Nil) ++
-      (if nativeOpts.experimentalDirectCodegen then List("--experimental-direct-codegen") else Nil) ++
+      (if nativeOpts.directCodegen then List("--direct-codegen") else Nil) ++
       nativeOpts.linking.flatMap(v => List("--linking", v)) ++
       nativeOpts.compile.flatMap(v => List("--compile", v)) ++
       nativeOpts.cCompile.flatMap(v => List("--c-compile", v)) ++
@@ -1779,7 +1779,7 @@ object ScalinoCli:
          |  --embed-resources          embed resources into the binary (readable via the Java resources API)
          |  --native-multithreading[=true|false]  Scala Native multithreading support
          |                                        (on by default; pass =false to opt out)
-         |  --native-experimental-direct-codegen[=true|false]  skip .ll text + per-file clang,
+         |  --native-direct-codegen[=true|false]  skip .ll text + per-file clang,
          |                                        building object files straight from libLLVM's C
          |                                        API (on by default, except on Windows; needs the
          |                                        toolchain itself running as compiled Scala Native
@@ -1815,7 +1815,7 @@ object ScalinoCli:
          |  //> using nativeTarget "application"   (application|library-dynamic|library-static)
          |  //> using nativeEmbedResources true
          |  //> using nativeMultithreading false   (on by default)
-         |  //> using nativeExperimentalDirectCodegen false   (on by default except on Windows)
+         |  //> using nativeDirectCodegen false   (on by default except on Windows)
          |
          |`test` auto-detects the test framework structurally (scans the resolved
          |test classpath for a class implementing sbt.testing.Framework -- no
@@ -1863,7 +1863,7 @@ object ScalinoCli:
     cliNativeCppCompile: List[String] = Nil,
     cliEmbedResources: Boolean = false,
     cliNativeMultithreading: Option[Boolean] = None,
-    cliNativeExperimentalDirectCodegen: Option[Boolean] = None
+    cliNativeDirectCodegen: Option[Boolean] = None
   ):
     // scala-cli-style: -v shows the full build-tool debug trace (raw
     // clang/linker invocations, NativeConfig dumps), the default ("info")
@@ -1917,12 +1917,12 @@ object ScalinoCli:
           if (v != "true" && v != "false")
             die(s"--native-multithreading=$v: expected true or false")
           o = o.copy(cliNativeMultithreading = Some(v == "true"))
-        case "--native-experimental-direct-codegen" => o = o.copy(cliNativeExperimentalDirectCodegen = Some(true))
-        case f if f.startsWith("--native-experimental-direct-codegen=") =>
-          val v = f.drop("--native-experimental-direct-codegen=".length)
+        case "--native-direct-codegen" => o = o.copy(cliNativeDirectCodegen = Some(true))
+        case f if f.startsWith("--native-direct-codegen=") =>
+          val v = f.drop("--native-direct-codegen=".length)
           if (v != "true" && v != "false")
-            die(s"--native-experimental-direct-codegen=$v: expected true or false")
-          o = o.copy(cliNativeExperimentalDirectCodegen = Some(v == "true"))
+            die(s"--native-direct-codegen=$v: expected true or false")
+          o = o.copy(cliNativeDirectCodegen = Some(v == "true"))
         case f if f.startsWith("-") => die(s"unknown option: $f")
         case f => o = o.copy(sources = o.sources :+ Paths.get(f))
       i += 1
