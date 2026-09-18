@@ -13,8 +13,16 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./00-env.sh
 
 [[ -f "$WORK/tools-patched.cp" ]] || { echo "run 04a-patch-tools.sh first" >&2; exit 1; }
+[[ -f "$WORK/tools-patched-jvm.cp" ]] || { echo "run 04a-patch-tools.sh first" >&2; exit 1; }
 
-DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools.cp")$CP_SEP$(to_native_path "$WORK/driver-classes")"
+# tools-patched-jvm.cp (04a-patch-tools.sh), NOT the raw tools.cp: LinkDriver
+# is compiled (below) against the *native*-targeted patched classpath
+# (NATIVE_DRIVER_CP), so its bytecode can reference e.g.
+# NativeConfig.withLLVMDirectCodeGen -- but it then actually *runs* here, on
+# a plain JVM, against DRIVER_CP. Those two classpaths must agree on
+# NativeConfig's shape or this throws NoSuchMethodError at runtime for
+# everyone, not just users of that experimental flag.
+DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools-patched-jvm.cp")$CP_SEP$(to_native_path "$WORK/driver-classes")"
 
 # Substitute the published javalib_native0.5_3 jar for the locally-built one
 # with patches/scala-native-0009 (ZipFileSystemProvider) actually applied --
@@ -51,6 +59,40 @@ LINK_WORK="$WORK/driver-link"
 rm -rf "$LINK_WORK"
 mkdir -p "$LINK_WORK"
 
+# EXPERIMENTAL (NativeConfig.useLLVMDirectCodeGen): best-effort, optional --
+# if a compatible libLLVM is discoverable, link it straight into
+# scalino-linkdriver itself so the @extern LLVM-C bindings compiled into its
+# NIR (tools/native/.../codegen/llvm/direct/LLVMCApi.scala) resolve. This is
+# separate from -- and does not require -- the flag actually being passed to
+# *this* bootstrap build (which always runs the JVM-hosted tools_3, where the
+# feature is a no-op); it only affects whether the resulting binary can use
+# the feature later, at real `scalino build --experimental-direct-codegen`
+# time. Never fails the build: if llvm-config/libLLVM aren't found, or the
+# version is too old, the flag stays silently unavailable at runtime.
+LLVM_DIRECT_CODEGEN_LINKING_OPTS=()
+if command -v llvm-config >/dev/null 2>&1; then
+  LLVM_CONFIG_VERSION="$(llvm-config --version 2>/dev/null || true)"
+  LLVM_CONFIG_MAJOR="${LLVM_CONFIG_VERSION%%.*}"
+  LLVM_CONFIG_LIBDIR="$(llvm-config --libdir 2>/dev/null || true)"
+  if [[ "${LLVM_CONFIG_MAJOR:-0}" =~ ^[0-9]+$ ]] && (( LLVM_CONFIG_MAJOR >= 13 )) \
+      && [[ -n "$LLVM_CONFIG_LIBDIR" && -d "$LLVM_CONFIG_LIBDIR" ]]; then
+    # Prefer whatever libLLVM.* the libdir actually contains (versioned or
+    # not) over guessing a name -- naming conventions vary a lot per distro.
+    LLVM_LIB_NAME="$(
+      ls "$LLVM_CONFIG_LIBDIR"/libLLVM.* "$LLVM_CONFIG_LIBDIR"/libLLVM-*.* 2>/dev/null \
+        | head -n1 \
+        | sed -E 's|.*/lib(LLVM[^./]*)\..*$|\1|'
+    )"
+    if [[ -n "$LLVM_LIB_NAME" ]]; then
+      LLVM_DIRECT_CODEGEN_LINKING_OPTS=(--linking "-L$LLVM_CONFIG_LIBDIR" --linking "-l$LLVM_LIB_NAME")
+      echo "  useLLVMDirectCodeGen: linking scalino-linkdriver against -l$LLVM_LIB_NAME ($LLVM_CONFIG_LIBDIR)"
+    fi
+  fi
+fi
+if [[ "${#LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]}" -eq 0 ]]; then
+  echo "  useLLVMDirectCodeGen: no compatible libLLVM found, feature will be unavailable at runtime (this is fine, it's opt-in)"
+fi
+
 "$JAVA" \
   -cp "$DRIVER_CP" \
     LinkDriver \
@@ -60,7 +102,8 @@ mkdir -p "$LINK_WORK"
     "$CLANG" \
     "$CLANGPP" \
     info \
-    --mode release-size
+    --mode release-size \
+    "${LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]+"${LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]}"}"
 
 BUILT="$LINK_WORK/LinkDriver"
 [[ -f "$BUILT" ]] || BUILT="$LINK_WORK/LinkDriver.exe"

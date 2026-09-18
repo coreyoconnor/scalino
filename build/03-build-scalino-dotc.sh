@@ -26,6 +26,7 @@ source ./00-env.sh
 for f in compiler.cp tools.cp nativelibs.cp nscplugin.cp nscplugin.jar.txt; do
   [[ -f "$WORK/$f" ]] || { echo "missing $WORK/$f -- run build/01-fetch-deps.sh first" >&2; exit 1; }
 done
+[[ -f "$WORK/tools-patched-jvm.cp" ]] || { echo "missing $WORK/tools-patched-jvm.cp -- run build/04a-patch-tools.sh first" >&2; exit 1; }
 [[ -f "$WORK/generated/MiniPhaseOverrides.scala" ]] || { echo "missing $WORK/generated/MiniPhaseOverrides.scala -- run build/02b-gen-megaphase-overrides.sh first" >&2; exit 1; }
 [[ -x "$DIST/scalino-linkdriver" ]] || { echo "missing $DIST/scalino-linkdriver -- run build/04-build-scalino-linkdriver.sh first" >&2; exit 1; }
 [[ -d "$WORK/driver-classes" ]] || { echo "missing $WORK/driver-classes -- run build/04-build-scalino-linkdriver.sh first" >&2; exit 1; }
@@ -103,7 +104,13 @@ mkdir -p "$LINK_WORK"
 # null-guard-elimination pass StackOverflowed there against dotc's
 # unusually large, heavily-branching methods (see docs/findings.md); this
 # entry point compiles the exact same dotc, so the same risk applies here.
-DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools.cp")$CP_SEP$(to_native_path "$WORK/driver-classes")"
+## LinkDriver.class here is the exact same compiled artifact 04's own second
+# step runs -- compiled against tools_native0.5_3's patched classpath, so it
+# must run against tools_3's *matching* patch (tools-patched-jvm.cp, not raw
+# tools.cp) or a NativeConfig method it references (e.g.
+# withLLVMDirectCodeGen) throws NoSuchMethodError here. See 04's own DRIVER_CP
+# comment for the full explanation.
+DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools-patched-jvm.cp")$CP_SEP$(to_native_path "$WORK/driver-classes")"
 "$JAVA" \
   -cp "$DRIVER_CP" \
     LinkDriver \

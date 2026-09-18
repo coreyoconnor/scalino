@@ -21,4 +21,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 ./03b-build-scalalib-retained.sh
 ./07-build-scalino.sh
 ./08-build-scalino-lsp.sh
+# tools-patched-jvm.jar (04a-patch-tools.sh): unlike tools-patched.jar (which
+# 06-package.sh already drops right after 04, since nothing after that point
+# needs it), this one has to survive through 03/03b/07/08 -- they all run
+# LinkDriver.class on a plain JVM against it (see e.g. 03-build-scalino-dotc.sh's
+# DRIVER_CP comment). Safe to drop only now, after the very last consumer.
+rm -f "$(cd .. && pwd)/dist/tools-patched-jvm.jar"
 echo "OK: toolchain built in $(cd .. && pwd)/dist"

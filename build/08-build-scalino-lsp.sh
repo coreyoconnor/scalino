@@ -51,6 +51,7 @@ source ./00-env.sh
 for f in compiler.cp tools.cp nativelibs.cp nscplugin.cp nscplugin.jar.txt lsp.cp; do
   [[ -f "$WORK/$f" ]] || { echo "missing $WORK/$f -- run build/01-fetch-deps.sh first" >&2; exit 1; }
 done
+[[ -f "$WORK/tools-patched-jvm.cp" ]] || { echo "missing $WORK/tools-patched-jvm.cp -- run build/04a-patch-tools.sh first" >&2; exit 1; }
 [[ -f "$WORK/generated/MiniPhaseOverrides.scala" ]] || { echo "missing $WORK/generated/MiniPhaseOverrides.scala -- run build/02b-gen-megaphase-overrides.sh first" >&2; exit 1; }
 [[ -x "$DIST/scalino-linkdriver" ]] || { echo "missing $DIST/scalino-linkdriver -- run build/04-build-scalino-linkdriver.sh first" >&2; exit 1; }
 [[ -d "$WORK/driver-classes" ]] || { echo "missing $WORK/driver-classes -- run build/04-build-scalino-linkdriver.sh first" >&2; exit 1; }
@@ -155,8 +156,9 @@ rm -rf "$LINK_WORK"
 mkdir -p "$LINK_WORK"
 # Run LinkDriver's own main directly via java, not the compiled native
 # $DIST/scalino-linkdriver binary -- see 03-build-scalino-dotc.sh's identical
-# link step for the full rationale.
-DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools.cp")$CP_SEP$(to_native_path "$WORK/driver-classes")"
+# link step for the full rationale (tools-patched-jvm.cp, not raw tools.cp,
+# for the same NoSuchMethodError-avoidance reason explained there).
+DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools-patched-jvm.cp")$CP_SEP$(to_native_path "$WORK/driver-classes")"
 "$JAVA" \
   -cp "$DRIVER_CP" \
     LinkDriver \
