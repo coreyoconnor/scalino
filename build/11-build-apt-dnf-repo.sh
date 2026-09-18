@@ -83,7 +83,13 @@ done
 
 cp "$work/pubkey.asc" "$site/scalino-signing-key.pub.asc"
 
-cat > "$site/index.html" <<'HTML'
+# The main site (docs/, deployed by pages.yml) owns the Pages root -- a
+# GitHub Pages deploy is a full-tree replace, so this job must merge the
+# apt/dnf repo tree UNDER that site rather than emitting its own index.html,
+# or it would clobber the homepage on every release.
+cp -a docs/. "$site/"
+
+cat > "$site/install.html" <<'HTML'
 <!doctype html><meta charset="utf-8"><title>scalino package repos</title>
 <h1>scalino apt/dnf repos</h1>
 <h2>Debian/Ubuntu</h2>
@@ -108,4 +114,4 @@ sudo dnf install scalino
 </pre>
 HTML
 
-echo "OK: $site ready (apt/, dnf/, scalino-signing-key.pub.asc, index.html)"
+echo "OK: $site ready (apt/, dnf/, scalino-signing-key.pub.asc, install.html, docs/ merged in)"
