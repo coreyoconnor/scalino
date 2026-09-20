@@ -52,10 +52,48 @@ SHARED_SOURCES=(
 )
 NSCPLUGIN_JAR="$(cat "$WORK/nscplugin.jar.txt")"
 
+# ---- nir-targeted patch (nir_native0.5_3 only -- NOT nir_3/the JVM jar: the
+# JVM bootstrap path's own perf isn't a target, only the final compiled
+# scalino-linkdriver binary's is, and that binary's nir.Val/Type behavior
+# comes from whatever nir_native0.5_3 was reachable when NATIVE_DRIVER_CP
+# linked it, in 04-build-scalino-linkdriver.sh). Caches Val/Type's hashCode
+# (MurmurHash3.productHash) the same way nir.Op/nir.Sig already do -- see
+# docs/findings.md profiling notes: uncached case-class structural hashing on
+# these two was the single largest remaining scalino-owned hot path. ----
+NIR_SOURCES=(
+  "$VENDOR/nir/src/main/scala/scala/scalanative/nir/Vals.scala"
+  "$VENDOR/nir/src/main/scala/scala/scalanative/nir/Types.scala"
+  "$VENDOR/nir/src/main/scala/scala/scalanative/nir/Insts.scala"
+)
+ORIG_NIR_JAR="$(tr "$CP_SEP" '\n' < "$WORK/tools-native.cp" | grep "nir_native0.5_3-$SCALA_NATIVE_VERSION.jar$")"
+[[ -n "$ORIG_NIR_JAR" ]] || { echo "could not find nir_native0.5_3-$SCALA_NATIVE_VERSION.jar on tools-native.cp" >&2; exit 1; }
+
+PATCHED_NIR_DIR="$WORK/patched-nir-native-classes"
+PATCHED_NIR_JAR="$DIST/nir-native-patched.jar"
+
+rm -rf "$PATCHED_NIR_DIR"
+mkdir -p "$PATCHED_NIR_DIR"
+"$JAVA" -cp "$(cat "$WORK/compiler.cp")" dotty.tools.dotc.Main \
+  -Xplugin:"$NSCPLUGIN_JAR" \
+  -Xplugin-require:scalanative \
+  -classpath "$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools-native.cp")" \
+  -d "$PATCHED_NIR_DIR" \
+  "${NIR_SOURCES[@]}"
+
+cp "$ORIG_NIR_JAR" "$PATCHED_NIR_JAR"
+(cd "$PATCHED_NIR_DIR" && "$JAR" uf "$PATCHED_NIR_JAR" $(find scala -type f))
+
+sed "s#$ORIG_NIR_JAR#$PATCHED_NIR_JAR#" "$WORK/tools-native.cp" > "$WORK/nir-native-patched.cp"
+
+echo "OK: $PATCHED_NIR_JAR"
+
 # ---- Native-targeted patch (tools_native0.5_3): also gets the direct-codegen
-# implementation itself (tools/native/-only: @extern doesn't exist for JVM). ----
-ORIG_JAR="$(tr "$CP_SEP" '\n' < "$WORK/tools-native.cp" | grep "tools_native0.5_3-$SCALA_NATIVE_VERSION.jar$")"
-[[ -n "$ORIG_JAR" ]] || { echo "could not find tools_native0.5_3-$SCALA_NATIVE_VERSION.jar on tools-native.cp" >&2; exit 1; }
+# implementation itself (tools/native/-only: @extern doesn't exist for JVM).
+# Built on top of nir-native-patched.cp (not the raw tools-native.cp) so the
+# nir patch above chains through into tools-patched.cp below, and from there
+# into NATIVE_DRIVER_CP in 04-build-scalino-linkdriver.sh. ----
+ORIG_JAR="$(tr "$CP_SEP" '\n' < "$WORK/nir-native-patched.cp" | grep "tools_native0.5_3-$SCALA_NATIVE_VERSION.jar$")"
+[[ -n "$ORIG_JAR" ]] || { echo "could not find tools_native0.5_3-$SCALA_NATIVE_VERSION.jar on nir-native-patched.cp" >&2; exit 1; }
 
 PATCHED_DIR="$WORK/patched-tools-classes"
 PATCHED_JAR="$DIST/tools-patched.jar"
@@ -67,7 +105,7 @@ PATCHED_JAR="$DIST/tools-patched.jar"
 # split caused a scala.runtime.LazyVals TASTy/binary mismatch. A single
 # unified classpath for both flags avoids it (same pattern LinkDriver.scala's
 # own build step already uses).
-FULL_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools-native.cp")"
+FULL_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/nir-native-patched.cp")"
 
 rm -rf "$PATCHED_DIR"
 mkdir -p "$PATCHED_DIR"
@@ -84,7 +122,7 @@ mkdir -p "$PATCHED_DIR"
 cp "$ORIG_JAR" "$PATCHED_JAR"
 (cd "$PATCHED_DIR" && "$JAR" uf "$PATCHED_JAR" $(find scala -type f))
 
-sed "s#$ORIG_JAR#$PATCHED_JAR#" "$WORK/tools-native.cp" > "$WORK/tools-patched.cp"
+sed "s#$ORIG_JAR#$PATCHED_JAR#" "$WORK/nir-native-patched.cp" > "$WORK/tools-patched.cp"
 
 echo "OK: $PATCHED_JAR"
 
