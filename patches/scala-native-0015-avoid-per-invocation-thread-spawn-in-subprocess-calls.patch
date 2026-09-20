@@ -1,0 +1,193 @@
+diff --git a/tools/src/main/scala/scala/scalanative/build/LLVM.scala b/tools/src/main/scala/scala/scalanative/build/LLVM.scala
+index 0ae5846..0c9440d 100644
+--- a/tools/src/main/scala/scala/scalanative/build/LLVM.scala
++++ b/tools/src/main/scala/scala/scalanative/build/LLVM.scala
+@@ -1,11 +1,10 @@
+ package scala.scalanative
+ package build
+ 
+-import java.io.{File, PrintWriter}
++import java.io.{BufferedReader, File, InputStreamReader, PrintWriter}
+ import java.nio.file.{Files, Path, Paths, StandardCopyOption}
+ 
+ import scala.concurrent._
+-import scala.sys.process._
+ import scala.util.{Failure, Success}
+ 
+ import scala.scalanative.build.IO.RichPath
+@@ -35,6 +34,41 @@ private[scalanative] object LLVM {
+   /** List of source patterns used: ".c, .cpp, .S" */
+   val srcExtensions = Seq(".c", cppExt, ".S")
+ 
++  /** Runs `cmd` to completion, logging its merged stdout/stderr via `logger`.
++   *
++   *  Uses `java.lang.ProcessBuilder` directly and reads its output on the
++   *  calling thread instead of `scala.sys.process`'s `Process(...) !`, which
++   *  spawns 2-3 short-lived reader/wait threads per invocation -- with one
++   *  call per compiled unit, that added up to hundreds of throwaway OS
++   *  threads over a build.
++   */
++  private def runProcess(
++      cmd: Seq[String],
++      cwd: File,
++      logger: Logger,
++      stdin: Option[File] = None
++  ): Int = {
++    val pb = new java.lang.ProcessBuilder(cmd*)
++      .directory(cwd)
++      .redirectErrorStream(true)
++    stdin.foreach(pb.redirectInput)
++    val proc = pb.start()
++    val reader = new BufferedReader(new InputStreamReader(proc.getInputStream))
++    var line = reader.readLine()
++    while (line != null) {
++      logger.info(line)
++      line = reader.readLine()
++    }
++    proc.waitFor()
++  }
++
++  /** An external command to run via [[runProcess]]. */
++  private final case class Cmd(
++      args: Seq[String],
++      cwd: File,
++      stdin: Option[File] = None
++  )
++
+   /** Compile the given files to object files
+    *
+    *  @param config
+@@ -49,18 +83,35 @@ private[scalanative] object LLVM {
+   def compile(
+       config: Config,
+       analysis: ReachabilityAnalysis.Result,
+-      path: Path
++      path: Path,
++      // own-implementation fix: explicit, required hash-file path for the
++      // userConfigHasChanged check (was implicitly always
++      // config.workDir.resolve(Build.userConfigHashFile) -- pass
++      // Build.defaultUserConfigHashPath(config) for identical behavior). See
++      // the comment on Build.userConfigHasChanged for why this exists.
++      hashPath: Path
+   )(implicit
+       ec: ExecutionContext
+   ): Future[Path] = {
+     implicit val _config: Config = config
+     implicit val _analysis: ReachabilityAnalysis.Result = analysis
+ 
++    // EXPERIMENTAL (NativeConfig.useLLVMDirectCodeGen): a partition already
++    // compiled straight to an object file by DirectCodeGen (CodeGen.scala)
++    // arrives here already ending in `oExt` -- pass it through unchanged.
++    // An `.ll` (or other source) path never does, since the normal path
++    // below always derives its own output path by *appending* oExt. An early
++    // `return` here (rather than wrapping the rest of the method in an
++    // `else` block) deliberately leaves every line below byte-for-byte
++    // unchanged, so it doesn't shift patches/scala-native-0001's own hunk
++    // against this exact method out of the context it expects.
++    if (path.abs.endsWith(oExt)) return Future.successful(path)
++
+     val inpath = path.abs
+     val outpath = inpath + oExt
+     val objPath = Paths.get(outpath)
+     // compile if out of date or no object file
+-    if (needsCompiling(path, objPath)) compileFile(path, objPath)
++    if (needsCompiling(path, objPath, hashPath)) compileFile(path, objPath)
+     else Future.successful(objPath)
+   }
+ 
+@@ -118,8 +169,7 @@ private[scalanative] object LLVM {
+ 
+     // compile
+     config.logger.running(compilec)
+-    val result = Process(compilec, workDir.toFile) !
+-      Logger.toProcessLogger(config.logger)
++    val result = runProcess(compilec, workDir.toFile, config.logger)
+     if (result != 0) {
+       throw new BuildException(s"Failed to compile ${inpath}")
+     }
+@@ -160,7 +210,7 @@ private[scalanative] object LLVM {
+         prepareArchiveCommand(objectsPaths)
+     }
+     // link
+-    val result = command ! Logger.toProcessLogger(config.logger)
++    val result = runProcess(command.args, command.cwd, config.logger, command.stdin)
+     if (result != 0) {
+       throw new BuildException(s"Failed to link ${buildPath}")
+     }
+@@ -173,8 +223,11 @@ private[scalanative] object LLVM {
+    */
+   def dsymutil(config: Config, path: Path): Unit =
+     Discover.tryDiscover("dsymutil", "LLVM_BIN").flatMap { dsymutil =>
+-      val proc = Process(Seq(dsymutil.abs, path.abs), config.workDir.toFile())
+-      val result = proc ! Logger.toProcessLogger(config.logger)
++      val result = runProcess(
++        Seq(dsymutil.abs, path.abs),
++        config.workDir.toFile(),
++        config.logger
++      )
+       if (result != 0) {
+         Failure(
+           new BuildException(
+@@ -332,7 +385,7 @@ private[scalanative] object LLVM {
+ 
+     val command = Seq(compiler, s"@${configFile.getAbsolutePath()}")
+     config.logger.running(command)
+-    Process(command, config.workDir.toFile())
++    Cmd(command, config.workDir.toFile())
+   }
+ 
+   private def prepareArchiveCommand(
+@@ -373,7 +426,7 @@ private[scalanative] object LLVM {
+       val command = Seq(ar.abs, "-M")
+       config.logger.running(command)
+ 
+-      Process(command, config.workDir.toFile()) #< MIRScriptFile
++      Cmd(command, config.workDir.toFile(), stdin = Some(MIRScriptFile))
+     }
+ 
+     MRICompatibleAR match {
+@@ -381,7 +434,7 @@ private[scalanative] object LLVM {
+         val ar = Discover.discover("ar")
+         val command = Seq(ar.abs, "rc", config.buildPath.abs) ++ stageFiles()
+         config.logger.running(command)
+-        Process(command, config.workDir.toFile())
++        Cmd(command, config.workDir.toFile())
+       case Some(path) => useMRIScript(path)
+     }
+   }
+@@ -397,11 +450,11 @@ private[scalanative] object LLVM {
+    *  @return
+    *    true if it needs compiling false otherwise.
+    */
+-  @inline private def needsCompiling(in: Path, out: Path)(implicit
+-      config: Config
++  @inline private def needsCompiling(in: Path, out: Path, hashPath: Path)(
++      implicit config: Config
+   ): Boolean = {
+     in.toFile().lastModified() > out.toFile().lastModified() ||
+-    Build.userConfigHasChanged(config)
++    Build.userConfigHasChanged(config, hashPath)
+   }
+ 
+   /** Looks at all the object files to see if one is newer than the output
+diff --git a/tools/src/main/scala/scala/scalanative/build/Logger.scala b/tools/src/main/scala/scala/scalanative/build/Logger.scala
+index 9f97d97..5032477 100644
+--- a/tools/src/main/scala/scala/scalanative/build/Logger.scala
++++ b/tools/src/main/scala/scala/scalanative/build/Logger.scala
+@@ -3,7 +3,6 @@ package scala.scalanative.build
+ import java.lang.System.{err, lineSeparator => nl, out}
+ 
+ import scala.concurrent._
+-import scala.sys.process.ProcessLogger
+ 
+ /** Interface to report and/or collect messages given by the toolchain. */
+ trait Logger {
+@@ -107,8 +106,4 @@ object Logger {
+     override def warn(msg: String): Unit = warnFn(msg)
+     override def error(msg: String): Unit = errorFn(msg)
+   }
+-
+-  /** Turns the given logger into a `ProcessLogger`. */
+-  def toProcessLogger(logger: Logger): ProcessLogger =
+-    ProcessLogger(logger.info, logger.error)
+ }
