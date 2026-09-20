@@ -32,8 +32,14 @@ runs:
         # reason -- llvm-config's own static libs don't include it even
         # though LLVM_ENABLE_ZSTD pulls it in) and pkg-config is how the
         # build script locates that .a instead of accidentally linking the
-        # dynamic libzstd.so sitting right next to it.
-        sudo apt-get install -y clang llvm-dev libzstd-dev pkg-config
+        # dynamic libzstd.so sitting right next to it. libtinfo-dev provides
+        # the libtinfo.so dev symlink that -ltinfo needs at link time --
+        # libLLVMSupport.a calls set_curterm/setupterm/tigetnum/del_curterm
+        # directly (Process::FileDescriptorHasColors), which llvm-config
+        # --system-libs doesn't report (same gap as zstd); the runner ships
+        # libtinfo6's runtime .so.6 already (bash/less need it) but not the
+        # unversioned .so symlink -l needs.
+        sudo apt-get install -y clang llvm-dev libzstd-dev libtinfo-dev pkg-config
 
     - name: Install llvm-config/libLLVM (macOS)
       if: runner.os == 'macOS'

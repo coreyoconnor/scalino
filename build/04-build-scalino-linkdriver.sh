@@ -130,9 +130,30 @@ if command -v llvm-config >/dev/null 2>&1; then
       echo "  WARNING: no static libzstd.a found via pkg-config -- falling back to dynamic -lzstd, which reintroduces a runtime dependency (install e.g. 'libzstd-dev' on Debian/Ubuntu, or 'zstd' via Homebrew)." >&2
       ZSTD_STATIC="-lzstd"
     fi
+    # terminfo: libLLVMSupport.a's Process::FileDescriptorHasColors calls
+    # set_curterm/setupterm/tigetnum/del_curterm directly. llvm-config
+    # --system-libs doesn't report this dependency either (same
+    # longstanding limitation as zstd above) -- on Linux it's normally
+    # pulled in transitively through ncurses/readline's own link chain,
+    # but a raw static-archive link has no such transitive path and
+    # leaves these undefined. Not needed on macOS: Apple's libc++/libSystem
+    # link closure already resolves them there. Probe candidate lib names
+    # (distros vary: tinfo vs the bundled-into-ncurses fallback) with a
+    # throwaway link instead of hardcoding one, since the -dev package that
+    # ships the linkable .so (not just the runtime .so.N) differs by distro.
+    TERMINFO_LIB=""
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+      for cand in tinfo ncursesw ncurses curses; do
+        if echo 'int main(){return 0;}' | "$CLANG" -x c - -l"$cand" -o /dev/null >/dev/null 2>&1; then
+          TERMINFO_LIB="-l$cand"
+          break
+        fi
+      done
+      [[ -n "$TERMINFO_LIB" ]] || echo "  WARNING: no linkable terminfo library found (tried tinfo/ncursesw/ncurses/curses) -- link will likely fail with undefined references to set_curterm/setupterm/tigetnum/del_curterm. Install e.g. 'libtinfo-dev' (Debian/Ubuntu) or 'ncurses-devel' (Fedora)." >&2
+    fi
     case "$(uname -s)" in
       Darwin) LLVM_SYSTEM_LIBS=(-lc++ "$ZSTD_STATIC") ;;
-      *) LLVM_SYSTEM_LIBS=(-lstdc++ "$ZSTD_STATIC") ;;
+      *) LLVM_SYSTEM_LIBS=(-lstdc++ "$ZSTD_STATIC" ${TERMINFO_LIB:+"$TERMINFO_LIB"}) ;;
     esac
     LLVM_SYSTEM_LIBS+=($(llvm-config --system-libs 2>/dev/null))
     if [[ "${#LLVM_STATIC_LIBS[@]}" -gt 0 ]]; then
