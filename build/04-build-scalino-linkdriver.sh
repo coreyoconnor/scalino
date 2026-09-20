@@ -82,7 +82,23 @@ if command -v llvm-config >/dev/null 2>&1; then
   LLVM_CONFIG_LIBDIR="$(llvm-config --libdir 2>/dev/null || true)"
   if [[ "${LLVM_CONFIG_MAJOR:-0}" =~ ^[0-9]+$ ]] && (( LLVM_CONFIG_MAJOR >= 13 )) \
       && [[ -n "$LLVM_CONFIG_LIBDIR" && -d "$LLVM_CONFIG_LIBDIR" ]]; then
-    LLVM_STATIC_LIBS=($(llvm-config --link-static --libs all 2>/dev/null))
+    # "all" includes optional components (e.g. Polly/PollyISL) that some
+    # distros' llvm-config reports as available even though the matching
+    # .a isn't actually installed (Ubuntu's llvm-dev doesn't ship libPolly*,
+    # that's a separate libpolly-<ver>-dev package) -- filter those -lFoo
+    # flags down to ones whose libFoo.a actually exists in LLVM_CONFIG_LIBDIR,
+    # instead of failing the link over components we don't use anyway.
+    LLVM_STATIC_LIBS_ALL=($(llvm-config --link-static --libs all 2>/dev/null))
+    LLVM_STATIC_LIBS=()
+    for lib in "${LLVM_STATIC_LIBS_ALL[@]}"; do
+      if [[ "$lib" == -l* && -f "$LLVM_CONFIG_LIBDIR/lib${lib#-l}.a" ]]; then
+        LLVM_STATIC_LIBS+=("$lib")
+      elif [[ "$lib" != -l* ]]; then
+        LLVM_STATIC_LIBS+=("$lib")
+      else
+        echo "  skipping $lib: no lib${lib#-l}.a in $LLVM_CONFIG_LIBDIR (component not actually installed)" >&2
+      fi
+    done
     # llvm-config --system-libs doesn't report these two, but the archives
     # need them once actually resolved at (our) link time rather than
     # deferred to a shared lib's own dependency chain: (1) the C++ runtime --
