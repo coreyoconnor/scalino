@@ -4,6 +4,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 ./00b-setup-vendor.sh
 ./01-fetch-deps.sh
 ./01b-build-patched-javalib.sh
+./01c-build-patched-nativelib.sh
 ./02-build-java-base.sh
 ./02a-build-compiler-patched.sh
 ./02b-gen-megaphase-overrides.sh
