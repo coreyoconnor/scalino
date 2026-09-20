@@ -66,6 +66,15 @@ mkdir -p "$LINK_WORK"
 # and needs libLLVM at link time, unconditionally. This is no longer optional:
 # without it, the LinkDriver step below fails with cryptic
 # "undefined reference to LLVMFunctionType" linker errors.
+#
+# Statically linked, not dynamically: the released scalino-linkdriver binary
+# must run on end-user machines (curl-installed) that have no libLLVM at all
+# (e.g. bare Fedora -- see docs/findings.md "static LLVM link"). Per-component
+# archives (libLLVMCore.a, libLLVMSupport.a, ...) have no same-named .so/.dylib
+# counterpart -- only the combined libLLVM does -- so plain "-lLLVMCore" etc.
+# always resolves to the static archive on both Linux and macOS; no
+# -Wl,-Bstatic tricks needed. `llvm-config --link-static` gives us those
+# per-component -l flags instead of the one combined "-lLLVM".
 LLVM_DIRECT_CODEGEN_LINKING_OPTS=()
 if command -v llvm-config >/dev/null 2>&1; then
   LLVM_CONFIG_VERSION="$(llvm-config --version 2>/dev/null || true)"
@@ -73,21 +82,67 @@ if command -v llvm-config >/dev/null 2>&1; then
   LLVM_CONFIG_LIBDIR="$(llvm-config --libdir 2>/dev/null || true)"
   if [[ "${LLVM_CONFIG_MAJOR:-0}" =~ ^[0-9]+$ ]] && (( LLVM_CONFIG_MAJOR >= 13 )) \
       && [[ -n "$LLVM_CONFIG_LIBDIR" && -d "$LLVM_CONFIG_LIBDIR" ]]; then
-    # Prefer whatever libLLVM.* the libdir actually contains (versioned or
-    # not) over guessing a name -- naming conventions vary a lot per distro.
-    LLVM_LIB_NAME="$(
-      ls "$LLVM_CONFIG_LIBDIR"/libLLVM.* "$LLVM_CONFIG_LIBDIR"/libLLVM-*.* 2>/dev/null \
-        | head -n1 \
-        | sed -E 's|.*/lib(LLVM[^./]*)\..*$|\1|'
-    )"
-    if [[ -n "$LLVM_LIB_NAME" ]]; then
-      LLVM_DIRECT_CODEGEN_LINKING_OPTS=(--linking "-L$LLVM_CONFIG_LIBDIR" --linking "-l$LLVM_LIB_NAME")
-      echo "  useLLVMDirectCodeGen: linking scalino-linkdriver against -l$LLVM_LIB_NAME ($LLVM_CONFIG_LIBDIR)"
+    LLVM_STATIC_LIBS=($(llvm-config --link-static --libs all 2>/dev/null))
+    # llvm-config --system-libs doesn't report these two, but the archives
+    # need them once actually resolved at (our) link time rather than
+    # deferred to a shared lib's own dependency chain: (1) the C++ runtime --
+    # dynamically linking the combined libLLVM.so/.dylib worked without one
+    # because THAT link carried its own libc++/libstdc++ dependency,
+    # transparently satisfied at load time; raw .a archives have no such
+    # thing, their std::__1::... references become our problem directly.
+    # (2) zstd -- LLVM_ENABLE_ZSTD is on in both Homebrew's and Ubuntu's LLVM
+    # builds, but llvm-config's system-libs output omits it regardless
+    # (longstanding llvm-config limitation, not distro-specific). Unlike
+    # libc++/libstdc++ (ubiquitous system libs, fine to leave dynamic --
+    # every Linux/macOS has them, same as Rust's own rustc does), zstd is
+    # exactly the kind of not-guaranteed-present dependency this whole change
+    # is meant to eliminate, so it must be forced static too. It isn't
+    # LLVM's own archive (no per-component .a to exploit the "no same-named
+    # dylib" trick with) -- Homebrew/apt both ship libzstd.a *and*
+    # libzstd.dylib/.so side by side, so plain "-lzstd" silently prefers the
+    # dynamic one. Resolve its real static archive path via pkg-config
+    # (ships a .pc file on both Homebrew and Debian/Ubuntu's libzstd-dev) and
+    # pass that path directly instead of "-lzstd" -- passing a linker a full
+    # path to a .a, instead of "-l" + "-L", always forces static regardless
+    # of platform, with no -Wl,-Bstatic/-Bdynamic (GNU-ld-only) needed.
+    ZSTD_STATIC=""
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libzstd 2>/dev/null; then
+      ZSTD_LIBDIR="$(pkg-config --variable=libdir libzstd 2>/dev/null || true)"
+      [[ -f "$ZSTD_LIBDIR/libzstd.a" ]] && ZSTD_STATIC="$ZSTD_LIBDIR/libzstd.a"
+    fi
+    if [[ -z "$ZSTD_STATIC" ]]; then
+      echo "  WARNING: no static libzstd.a found via pkg-config -- falling back to dynamic -lzstd, which reintroduces a runtime dependency (install e.g. 'libzstd-dev' on Debian/Ubuntu, or 'zstd' via Homebrew)." >&2
+      ZSTD_STATIC="-lzstd"
+    fi
+    case "$(uname -s)" in
+      Darwin) LLVM_SYSTEM_LIBS=(-lc++ "$ZSTD_STATIC") ;;
+      *) LLVM_SYSTEM_LIBS=(-lstdc++ "$ZSTD_STATIC") ;;
+    esac
+    LLVM_SYSTEM_LIBS+=($(llvm-config --system-libs 2>/dev/null))
+    if [[ "${#LLVM_STATIC_LIBS[@]}" -gt 0 ]]; then
+      LLVM_DIRECT_CODEGEN_LINKING_OPTS=(--linking "-L$LLVM_CONFIG_LIBDIR")
+      # array-guard idiom (not plain "${arr[@]}"): macOS's /bin/bash is stuck
+      # on 3.2, which treats expanding a possibly-empty array as an unbound
+      # variable under `set -u` -- llvm-config --system-libs legitimately
+      # returns nothing on some LLVM builds (e.g. Homebrew's).
+      #
+      # LLVM_STATIC_LIBS listed *twice*: LLVM's component archives reference
+      # each other circularly (e.g. libLLVMX86CodeGen.a's GlobalISel code
+      # needs a vtable that only gets pulled in from libLLVMCodeGen.a), and
+      # unlike GNU ld's --start-group/--end-group, Apple's ld64 (and a plain
+      # single-pass ld in general) resolves archives in one left-to-right
+      # pass -- a symbol needed by an earlier archive but defined only in a
+      # later one is otherwise left undefined. Repeating the list is the
+      # standard portable workaround (no --start-group equivalent on ld64).
+      for f in "${LLVM_STATIC_LIBS[@]}" "${LLVM_STATIC_LIBS[@]}" ${LLVM_SYSTEM_LIBS[@]+"${LLVM_SYSTEM_LIBS[@]}"}; do
+        LLVM_DIRECT_CODEGEN_LINKING_OPTS+=(--linking "$f")
+      done
+      echo "  useLLVMDirectCodeGen: statically linking ${#LLVM_STATIC_LIBS[@]} LLVM component libs + ${#LLVM_SYSTEM_LIBS[@]} system libs from $LLVM_CONFIG_LIBDIR"
     fi
   fi
 fi
 if [[ "${#LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]}" -eq 0 ]]; then
-  echo "no usable llvm-config/libLLVM (>= 13) found on PATH -- required to link scalino-linkdriver since direct LLVM-C codegen is on by default. Install e.g. 'llvm-dev' (Debian/Ubuntu) or 'llvm' (Homebrew) and ensure llvm-config is on PATH." >&2
+  echo "no usable llvm-config/static libLLVM (>= 13) found on PATH -- required to link scalino-linkdriver since direct LLVM-C codegen is on by default. Install e.g. 'llvm-dev' (Debian/Ubuntu, ships static libs already) or 'llvm' (Homebrew, ditto); on distros that split them out (e.g. Fedora's 'llvm-static'), install that too. Ensure llvm-config is on PATH." >&2
   exit 1
 fi
 

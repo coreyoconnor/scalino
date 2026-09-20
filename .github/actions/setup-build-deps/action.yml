@@ -21,12 +21,19 @@ runs:
       shell: bash
       run: |
         sudo apt-get update -y
-        # llvm-dev pulls in llvm-config + libLLVM-*.so: the direct LLVM-C
-        # codegen backend is on by default (build/04-build-scalino-linkdriver.sh),
-        # so scalino-linkdriver itself needs libLLVM at link time, not just
-        # clang -- without it the link fails with "undefined reference to
-        # LLVMFunctionType" etc.
-        sudo apt-get install -y clang llvm-dev
+        # llvm-dev pulls in llvm-config + libLLVM's per-component *.a static
+        # archives (Debian/Ubuntu bundle these into -dev, unlike e.g.
+        # Fedora's separate llvm-static): the direct LLVM-C codegen backend
+        # is on by default (build/04-build-scalino-linkdriver.sh), which
+        # statically links scalino-linkdriver itself against libLLVM so the
+        # *released* binary has no libLLVM runtime dependency at all -- end
+        # users installing via curl need nothing LLVM-related installed.
+        # libzstd-dev provides libzstd.a (needed alongside, for the same
+        # reason -- llvm-config's own static libs don't include it even
+        # though LLVM_ENABLE_ZSTD pulls it in) and pkg-config is how the
+        # build script locates that .a instead of accidentally linking the
+        # dynamic libzstd.so sitting right next to it.
+        sudo apt-get install -y clang llvm-dev libzstd-dev pkg-config
 
     - name: Install llvm-config/libLLVM (macOS)
       if: runner.os == 'macOS'
@@ -34,8 +41,13 @@ runs:
       run: |
         # Xcode command line tools ship clang/clang++ already, but not
         # llvm-config/libLLVM -- the direct LLVM-C codegen backend is on by
-        # default (build/04-build-scalino-linkdriver.sh), so
-        # scalino-linkdriver needs libLLVM at link time.
+        # default (build/04-build-scalino-linkdriver.sh), which statically
+        # links scalino-linkdriver itself against libLLVM (+ zstd, pulled in
+        # transitively as the llvm formula's own build dependency) so the
+        # *released* binary needs nothing LLVM-related installed at runtime
+        # -- same reasoning as the Linux step above. pkg-config (used to
+        # locate zstd's static .a instead of its dylib) ships preinstalled
+        # on GitHub's macOS runners.
         brew install llvm
         echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
 
