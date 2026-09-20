@@ -1,5 +1,5 @@
 diff --git a/tools/src/main/scala/scala/scalanative/build/LLVM.scala b/tools/src/main/scala/scala/scalanative/build/LLVM.scala
-index 0ae5846..0c9440d 100644
+index f151af2..0c9440d 100644
 --- a/tools/src/main/scala/scala/scalanative/build/LLVM.scala
 +++ b/tools/src/main/scala/scala/scalanative/build/LLVM.scala
 @@ -1,11 +1,10 @@
@@ -57,45 +57,7 @@ index 0ae5846..0c9440d 100644
    /** Compile the given files to object files
     *
     *  @param config
-@@ -49,18 +83,35 @@ private[scalanative] object LLVM {
-   def compile(
-       config: Config,
-       analysis: ReachabilityAnalysis.Result,
--      path: Path
-+      path: Path,
-+      // own-implementation fix: explicit, required hash-file path for the
-+      // userConfigHasChanged check (was implicitly always
-+      // config.workDir.resolve(Build.userConfigHashFile) -- pass
-+      // Build.defaultUserConfigHashPath(config) for identical behavior). See
-+      // the comment on Build.userConfigHasChanged for why this exists.
-+      hashPath: Path
-   )(implicit
-       ec: ExecutionContext
-   ): Future[Path] = {
-     implicit val _config: Config = config
-     implicit val _analysis: ReachabilityAnalysis.Result = analysis
- 
-+    // EXPERIMENTAL (NativeConfig.useLLVMDirectCodeGen): a partition already
-+    // compiled straight to an object file by DirectCodeGen (CodeGen.scala)
-+    // arrives here already ending in `oExt` -- pass it through unchanged.
-+    // An `.ll` (or other source) path never does, since the normal path
-+    // below always derives its own output path by *appending* oExt. An early
-+    // `return` here (rather than wrapping the rest of the method in an
-+    // `else` block) deliberately leaves every line below byte-for-byte
-+    // unchanged, so it doesn't shift patches/scala-native-0001's own hunk
-+    // against this exact method out of the context it expects.
-+    if (path.abs.endsWith(oExt)) return Future.successful(path)
-+
-     val inpath = path.abs
-     val outpath = inpath + oExt
-     val objPath = Paths.get(outpath)
-     // compile if out of date or no object file
--    if (needsCompiling(path, objPath)) compileFile(path, objPath)
-+    if (needsCompiling(path, objPath, hashPath)) compileFile(path, objPath)
-     else Future.successful(objPath)
-   }
- 
-@@ -118,8 +169,7 @@ private[scalanative] object LLVM {
+@@ -135,8 +169,7 @@ private[scalanative] object LLVM {
  
      // compile
      config.logger.running(compilec)
@@ -105,7 +67,7 @@ index 0ae5846..0c9440d 100644
      if (result != 0) {
        throw new BuildException(s"Failed to compile ${inpath}")
      }
-@@ -160,7 +210,7 @@ private[scalanative] object LLVM {
+@@ -177,7 +210,7 @@ private[scalanative] object LLVM {
          prepareArchiveCommand(objectsPaths)
      }
      // link
@@ -114,7 +76,7 @@ index 0ae5846..0c9440d 100644
      if (result != 0) {
        throw new BuildException(s"Failed to link ${buildPath}")
      }
-@@ -173,8 +223,11 @@ private[scalanative] object LLVM {
+@@ -190,8 +223,11 @@ private[scalanative] object LLVM {
     */
    def dsymutil(config: Config, path: Path): Unit =
      Discover.tryDiscover("dsymutil", "LLVM_BIN").flatMap { dsymutil =>
@@ -128,7 +90,7 @@ index 0ae5846..0c9440d 100644
        if (result != 0) {
          Failure(
            new BuildException(
-@@ -332,7 +385,7 @@ private[scalanative] object LLVM {
+@@ -349,7 +385,7 @@ private[scalanative] object LLVM {
  
      val command = Seq(compiler, s"@${configFile.getAbsolutePath()}")
      config.logger.running(command)
@@ -137,7 +99,7 @@ index 0ae5846..0c9440d 100644
    }
  
    private def prepareArchiveCommand(
-@@ -373,7 +426,7 @@ private[scalanative] object LLVM {
+@@ -390,7 +426,7 @@ private[scalanative] object LLVM {
        val command = Seq(ar.abs, "-M")
        config.logger.running(command)
  
@@ -146,7 +108,7 @@ index 0ae5846..0c9440d 100644
      }
  
      MRICompatibleAR match {
-@@ -381,7 +434,7 @@ private[scalanative] object LLVM {
+@@ -398,7 +434,7 @@ private[scalanative] object LLVM {
          val ar = Discover.discover("ar")
          val command = Seq(ar.abs, "rc", config.buildPath.abs) ++ stageFiles()
          config.logger.running(command)
@@ -155,21 +117,6 @@ index 0ae5846..0c9440d 100644
        case Some(path) => useMRIScript(path)
      }
    }
-@@ -397,11 +450,11 @@ private[scalanative] object LLVM {
-    *  @return
-    *    true if it needs compiling false otherwise.
-    */
--  @inline private def needsCompiling(in: Path, out: Path)(implicit
--      config: Config
-+  @inline private def needsCompiling(in: Path, out: Path, hashPath: Path)(
-+      implicit config: Config
-   ): Boolean = {
-     in.toFile().lastModified() > out.toFile().lastModified() ||
--    Build.userConfigHasChanged(config)
-+    Build.userConfigHasChanged(config, hashPath)
-   }
- 
-   /** Looks at all the object files to see if one is newer than the output
 diff --git a/tools/src/main/scala/scala/scalanative/build/Logger.scala b/tools/src/main/scala/scala/scalanative/build/Logger.scala
 index 9f97d97..5032477 100644
 --- a/tools/src/main/scala/scala/scalanative/build/Logger.scala
