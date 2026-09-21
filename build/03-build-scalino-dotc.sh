@@ -131,6 +131,7 @@ DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools-patched-jvm.cp")$
     "$CLANGPP" \
     info \
     --mode release-size \
+    --multithreading \
     --embed-resources
 
 BUILT="$LINK_WORK/dotty.tools.dotc.Main"

@@ -193,6 +193,7 @@ fi
     "$CLANGPP" \
     info \
     --mode release-size \
+    --multithreading \
     "${LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]+"${LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]}"}"
 
 BUILT="$LINK_WORK/LinkDriver"
