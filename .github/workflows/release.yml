@@ -23,10 +23,6 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    # A release should ship whatever platforms actually build, not be
-    # all-or-nothing -- a single broken/experimental target must not block
-    # publishing the others. The publish job below reports what's missing.
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -171,7 +167,6 @@ jobs:
   publish:
     name: Publish GitHub release
     needs: build
-    if: always()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
