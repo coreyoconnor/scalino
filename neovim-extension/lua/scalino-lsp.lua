@@ -43,17 +43,40 @@ local function resolve_cmd(opts)
   return "scalino-lsp"
 end
 
+-- scalino-lsp exits itself after SCALINO_LSP_IDLE_TIMEOUT_MINUTES of
+-- inactivity (default 30) to avoid piling up hanging processes -- see
+-- vendor/scala3/language-server/src/dotty/tools/languageserver/Main.scala.
+-- That's a clean exit (code 0), which Neovim's client treats as a
+-- deliberate stop rather than a crash, so it won't reattach on its own the
+-- way it would after a crash-restart. Re-`start` the client for every
+-- still-open scala buffer so editing resumes without needing to close and
+-- reopen the buffer.
+local function reattach_open_buffers(cfg)
+  vim.schedule(function()
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].filetype == "scala" then
+        vim.lsp.start(cfg, { bufnr = buf })
+      end
+    end
+  end)
+end
+
 --- @param opts table|nil { path?: string, args?: string[], env?: table }
 function M.setup(opts)
   opts = opts or {}
   local cmd = { resolve_cmd(opts), unpack(opts.args or { "-stdio" }) }
 
-  vim.lsp.config("scalino_lsp", {
+  local cfg = {
     cmd = cmd,
     filetypes = { "scala" },
     root_markers = { ".scalino-build", "build.sbt", ".git" },
     cmd_env = opts.env,
-  })
+  }
+  cfg.on_exit = function(_, _, _)
+    reattach_open_buffers(cfg)
+  end
+
+  vim.lsp.config("scalino_lsp", cfg)
   vim.lsp.enable("scalino_lsp")
 end
 
