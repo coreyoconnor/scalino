@@ -30,14 +30,10 @@ jobs:
             os: macos-15-intel
           - target: macos-arm64
             os: macos-14
-          # Windows x86_64 support is untested/experimental (see
-          # docs/findings.md) -- scala-native's C toolchain story there is
-          # the main unknown, so this is best-effort and doesn't fail the
-          # required CI signal. No windows-arm64 leg: not a target this
-          # toolchain supports yet.
-          - target: windows-x86_64
-            os: windows-latest
-            experimental: true
+          # Windows x86_64 CI disabled -- see docs/findings.md.
+          # - target: windows-x86_64
+          #   os: windows-latest
+          #   experimental: true
 
     steps:
       - uses: actions/checkout@v4
