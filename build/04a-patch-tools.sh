@@ -56,14 +56,19 @@ NSCPLUGIN_JAR="$(cat "$WORK/nscplugin.jar.txt")"
 # JVM bootstrap path's own perf isn't a target, only the final compiled
 # scalino-linkdriver binary's is, and that binary's nir.Val/Type behavior
 # comes from whatever nir_native0.5_3 was reachable when NATIVE_DRIVER_CP
-# linked it, in 04-build-scalino-linkdriver.sh). Caches Val/Type's hashCode
-# (MurmurHash3.productHash) the same way nir.Op/nir.Sig already do -- see
-# docs/findings.md profiling notes: uncached case-class structural hashing on
-# these two was the single largest remaining scalino-owned hot path. ----
+# linked it, in 04-build-scalino-linkdriver.sh). Caches Val/Type/Global's
+# hashCode (MurmurHash3.productHash) the same way nir.Op/nir.Sig already do
+# -- see docs/findings.md profiling notes: uncached case-class structural
+# hashing on these was the largest remaining scalino-owned hot path.
+# Global.Top/Member added after a follow-up profile showed anyHash/
+# caseClassHash/Global$Member.equals still hot -- Global.Member is the key
+# type for most of linker/interflow's reachability & dedup Maps/Sets, so its
+# default (uncached) case-class hashCode was recomputed on every lookup. ----
 NIR_SOURCES=(
   "$VENDOR/nir/src/main/scala/scala/scalanative/nir/Vals.scala"
   "$VENDOR/nir/src/main/scala/scala/scalanative/nir/Types.scala"
   "$VENDOR/nir/src/main/scala/scala/scalanative/nir/Insts.scala"
+  "$VENDOR/nir/src/main/scala/scala/scalanative/nir/Global.scala"
 )
 ORIG_NIR_JAR="$(tr "$CP_SEP" '\n' < "$WORK/tools-native.cp" | grep "nir_native0.5_3-$SCALA_NATIVE_VERSION.jar$")"
 [[ -n "$ORIG_NIR_JAR" ]] || { echo "could not find nir_native0.5_3-$SCALA_NATIVE_VERSION.jar on tools-native.cp" >&2; exit 1; }
