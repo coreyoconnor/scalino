@@ -47,6 +47,7 @@ SHARED_SOURCES=(
   "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/llvm/CodeGen.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGenPlan.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/Interflow.scala"
+  "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/Combine.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/Eval.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/MergeProcessor.scala"
 )
