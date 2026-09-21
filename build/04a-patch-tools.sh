@@ -44,6 +44,10 @@ SHARED_SOURCES=(
   "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/IncrementalCodeGenContext.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/SourceCodeCache.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/Lower.scala"
+  "$VENDOR/tools/src/main/scala/scala/scalanative/linker/Infos.scala"
+  "$VENDOR/tools/src/main/scala/scala/scalanative/linker/Reach.scala"
+  "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/Metadata.scala"
+  "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/VirtualTable.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/llvm/CodeGen.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGenPlan.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/Interflow.scala"
@@ -73,6 +77,7 @@ NIR_SOURCES=(
   "$VENDOR/nir/src/main/scala/scala/scalanative/nir/Insts.scala"
   "$VENDOR/nir/src/main/scala/scala/scalanative/nir/Global.scala"
   "$VENDOR/nir/src/main/scala/scala/scalanative/nir/ControlFlow.scala"
+  "$VENDOR/nir/src/main/scala/scala/scalanative/nir/SourcePosition.scala"
 )
 ORIG_NIR_JAR="$(tr "$CP_SEP" '\n' < "$WORK/tools-native.cp" | grep "nir_native0.5_3-$SCALA_NATIVE_VERSION.jar$")"
 [[ -n "$ORIG_NIR_JAR" ]] || { echo "could not find nir_native0.5_3-$SCALA_NATIVE_VERSION.jar on tools-native.cp" >&2; exit 1; }

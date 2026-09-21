@@ -120,6 +120,7 @@ object LinkDriver:
           // the flag to have an effect -- always on, same as every other
           // path, regardless of the direct-codegen flag.
           .withSourceLevelDebuggingConfig(SourceLevelDebuggingConfig.enabled)
+          .withIncrementalCompilation(true)
       )
 
     val outPath = Scope.apply[java.nio.file.Path] { (s: Scope) =>
