@@ -1,186 +1,11 @@
 diff --git a/tools/native/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGen.scala b/tools/native/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGen.scala
-new file mode 100644
-index 0000000..99d31d0
---- /dev/null
+index a39a800..d6de030 100644
+--- a/tools/native/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGen.scala
 +++ b/tools/native/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGen.scala
-@@ -0,0 +1,1269 @@
-+package scala.scalanative
-+package codegen
-+package llvm
-+package direct
-+
-+// EXPERIMENTAL (NativeConfig.useLLVMDirectCodeGen). Builds an LLVM module in
-+// memory via LLVM-C (LLVMCApi.scala) and emits an object file straight from
-+// it, instead of AbstractCodeGen's textual `.ll` + `clang -c` path. Mirrors
-+// AbstractCodeGen method-for-method (see CONTEXT comment on
-+// NativeConfig.useLLVMDirectCodeGen for the reasoning), but only covers a
-+// well-defined instruction subset -- see `Capability`.
-+//
-+// Fallback granularity is per-*definition*, not per-partition: a CodeGen
-+// partition (a package/source-file's worth of NIR defns, often hundreds) is
-+// split into the subset this backend can emit and the subset it can't (an
-+// exception-handling method, say), and only the latter falls back to
-+// AbstractCodeGen's `.ll` + clang path (as a second, separate object file for
-+// the same partition -- see CodeGen.scala's `tryDirectCodeGen`). Rejecting
-+// the WHOLE partition over one unsupported method would make this backend
-+// provide essentially no coverage in practice: exception-handling runtime
-+// code (array bounds/null checks, ClassCastException, ...) is reachable from
-+// nearly every real partition, even a trivial "hello world".
-+//
-+// Deliberately requires opaque pointers (platform.useOpaquePointers, i.e.
-+// clang/LLVM >= 15): this halves the amount of AbstractCodeGen's
-+// typed-vs-opaque-pointer branching that would otherwise need porting.
-+import java.nio.file.Path
-+
-+import scala.collection.mutable
-+
-+import scala.scalanative.build
-+import scala.scalanative.nir
-+import scala.scalanative.nir.ControlFlow.{Block, Graph => CFG}
-+import scala.scalanative.unsafe._
-+import scala.scalanative.unsigned._
-+
-+import LLVMCApi._
-+import LLVMCApi.{Core => C, Analysis => A, Target => T, TargetMachine => TM, DebugInfo => DI}
-+
-+private[codegen] object DirectCodeGen {
-+
-+  /** Pure, cheap classification of one partition -- no LLVM API calls, just
-+   *  a walk over already-in-memory NIR. Called synchronously (not inside a
-+   *  `Future`) by CodeGen.scala so it can decide *before* scheduling any
-+   *  work how many object files this partition turns into (one, if fully
-+   *  capable or fully incapable; two, if split).
-+   */
-+  def plan(config: build.Config, defns: Seq[nir.Defn])(implicit
-+      platform: PlatformInfo
-+  ): DirectCodeGenPlan =
-+    if (!Capability.wholeBuildGatesOk(config, platform)) DirectCodeGenPlan.Unavailable
-+    else {
-+      val (capable, incapable) = defns.partition(Capability.isDefnCapable)
-+      if (capable.isEmpty) DirectCodeGenPlan.Unavailable
-+      else DirectCodeGenPlan.Split(capable, incapable)
-+    }
-+
-+  /** Actually build the LLVM module for `capableDefns` (as classified by a
-+   *  prior call to [[plan]]) and emit it to `objPath`. Returns `false` --
-+   *  without leaving a trust-worthy `objPath` behind -- if anything
-+   *  unexpected goes wrong; the caller must then fall back to the regular
-+   *  `.ll` + clang path for `capableDefns` too (not just the definitions
-+   *  `plan` already classified as incapable).
-+   */
-+  def emit(
-+      config: build.Config,
-+      env: Map[nir.Global, nir.Defn],
-+      capableDefns: Seq[nir.Defn],
-+      objPath: Path
-+  )(implicit platform: PlatformInfo): Boolean =
-+    try {
-+      new DirectCodeGen(config, env, capableDefns).emitTo(objPath)
-+      true
-+    } catch {
-+      // Catches everything non-fatal, not just Unsupported: `plan`'s scan is
-+      // necessarily best-effort (it can't enumerate every NIR shape), and a
-+      // bug or an unanticipated construct in this experimental backend must
-+      // never break a build that the regular .ll + clang path would
-+      // otherwise have handled fine -- it should just fall back instead (we
-+      // can't trust objPath is valid if emitTo threw partway through).
-+      case scala.util.control.NonFatal(e) =>
-+        config.logger.debug(
-+          s"useLLVMDirectCodeGen: falling back to .ll+clang for this partition (${e.getMessage})"
-+        )
-+        false
-+    }
-+
-+  private object Capability {
-+
-+    /** Thrown from inside translation once we discover -- despite `plan`'s
-+     *  upfront scan -- a construct we don't support. Caught by `emit`; never
-+     *  escapes it. Using an exception here (rather than threading `Either`
-+     *  through every gen* method) keeps DirectCodeGen a structural mirror of
-+     *  AbstractCodeGen, which uses `unsupported(..)` (a thrown exception)
-+     *  the same way.
-+     */
-+    final case class Unsupported(reason: String) extends RuntimeException(reason)
-+
-+    /** Build-wide settings that gate the whole feature, not any one
-+     *  definition: either the entire backend is usable for this build, or
-+     *  none of it is.
-+     */
-+    def wholeBuildGatesOk(config: build.Config, platform: PlatformInfo): Boolean =
-+      platform.useOpaquePointers &&
-+        !platform.targetsWindows
-+      // Phase 3 lifted the three build-wide gates that used to live here:
-+      // multithreading (GC yield-point traps, see genOp's GCYield special
-+      // case + globalValueFor's thread-local handling), debug info (see
-+      // `debugInfo`/DIBuilder below), and C++ exceptions (see
-+      // buildLandingPad's usingCppExceptions branch). Windows stays
-+      // permanently out of scope (WindowsCompat/WindowsGnuCompat unported).
-+
-+    /** Per-definition capability check -- this is what makes the backend
-+     *  cover real programs: one method using an unsupported feature no
-+     *  longer drags every sibling definition in its partition down with it.
-+     */
-+    def isDefnCapable(defn: nir.Defn): Boolean = defn match {
-+      case d: nir.Defn.Define => d.insts.forall(instSupported)
-+      case _: nir.Defn.Const | _: nir.Defn.Var | _: nir.Defn.Declare => true
-+      case _ => false
-+    }
-+
-+    private def instSupported(inst: nir.Inst): Boolean = inst match {
-+      case nir.Inst.Label(_, _) | nir.Inst.Ret(_) | nir.Inst.Jump(_) =>
-+        true
-+      case nir.Inst.If(_, thenp, elsep) =>
-+        // A plain phi can't represent two edges from the same source block
-+        // to the same target carrying different args (AbstractCodeGen works
-+        // around this with a `select` rewrite, AbstractCodeGen.scala:729-752
-+        // -- not yet ported here, so just fall back for this rare shape).
-+        thenp.id != elsep.id
-+      case nir.Inst.Switch(_, _, _) => true
-+      case nir.Inst.Unreachable(unwind) => unwind eq nir.Next.None
-+      case nir.Inst.Let(_, op, _) =>
-+        // `unwind` (invoke+landingpad) is structurally allowed on ANY op by
-+        // ControlFlow.Graph (`edge(...)` fires for any Let with a non-None
-+        // unwind, not just Op.Call) and Interflow can rewrite an originally
-+        // invoke-guarded call down to a plain Copy/Comp/Elem/etc. while
-+        // leaving that unwind edge in place (observed live: `Copy(Global(...
-+        // G8instance...))` and `Comp(Ine, ...)` both carrying a real
-+        // Next.Unwind post-optimization). Only Op.Call's unwind actually
-+        // becomes an `invoke`, splitting the block (genBlock); every other
-+        // op just compiles normally and still gets its landingpad emitted
-+        // (dead code if nothing ever unwinds into it) -- exactly mirroring
-+        // AbstractCodeGen's `genBlockLandingPads`, which walks every
-+        // Let-with-unwind regardless of the op it's attached to.
-+        opSupported(op)
-+      case _ => false
-+    }
-+
-+    private def opSupported(op: nir.Op): Boolean = op match {
-+      // memoryOrder is now fully supported (LLVMSetOrdering + alignment, see
-+      // DirectCodeGen.genOp) -- Phase 1 only rejected atomics for lack of
-+      // time, not for any deeper reason.
-+      case _: nir.Op.Load | _: nir.Op.Store | _: nir.Op.Fence => true
-+      case _: nir.Op.Call | _: nir.Op.Elem | _: nir.Op.Stackalloc |
-+          _: nir.Op.Bin | _: nir.Op.Comp | _: nir.Op.Conv | _: nir.Op.Extract |
-+          _: nir.Op.Insert | _: nir.Op.Copy =>
-+        true
-+      case _ => false
-+    }
-+  }
-+}
-+
-+private[direct] final class DirectCodeGen(
-+    config: build.Config,
-+    env: Map[nir.Global, nir.Defn],
-+    defns: Seq[nir.Defn]
-+)(implicit platform: PlatformInfo) {
-+  import DirectCodeGen.Capability.Unsupported
-+
-+  private val ctx: LLVMContextRef = C.LLVMContextCreate()
-+  private val module: LLVMModuleRef =
-+    Zone.acquire { implicit z =>
-+      C.LLVMModuleCreateWithNameInContext(toCString("scalino-direct"), ctx)
-+    }
-+
+@@ -175,6 +175,18 @@ private[direct] final class DirectCodeGen(
+       C.LLVMModuleCreateWithNameInContext(toCString("scalino-direct"), ctx)
+     }
+ 
 +  // The LLVM-C Build* "name" arg is always immediately copied by LLVM (into
 +  // the new Value's own symbol-table entry, or nowhere at all when the name
 +  // is empty -- an unnamed temporary never even enters the symbol table);
@@ -193,109 +18,29 @@ index 0000000..99d31d0
 +  // genFunctionBody's per-block lambda).
 +  private val emptyName: CString = c""
 +
-+  private val ptrTy: LLVMTypeRef = C.LLVMPointerTypeInContext(ctx, 0.toUInt)
-+  private val typeCache = mutable.Map.empty[nir.Type, LLVMTypeRef]
-+  // Functions and global vars/consts, keyed by their NIR name. Populated as
-+  // we declare/define them; `globalValueFor` fills in extern decls on demand
-+  // for cross-partition references (mirrors AbstractCodeGen's `touch`/`deps`
-+  // + `genDeps`).
-+  private val globals = mutable.Map.empty[nir.Global, LLVMValueRef]
-+  // Two distinct nir.Global.Member keys can render to the SAME mangled LLVM
-+  // name -- e.g. overloaded @extern defs with no @name annotation all mangle
-+  // to their plain Scala method name (mangledName/nativeIdOf), so `ffi`'s two
-+  // overloaded `memset` defs (RawPtr vs CVoidPtr) are different Global.Member
-+  // values that both mangle to "memset". AbstractCodeGen handles this with
-+  // `externSigMembers` (rewriting a later call to reuse the first-declared
-+  // Member's text); doing the equivalent here by string dedup is simpler and
-+  // covers both Var/Const and Declare/Define alike. Without this, a second
-+  // `LLVMAddFunction(module, "memset", ...)` call in the same module doesn't
-+  // find the first -- LLVM silently auto-uniquifies the name to "memset.1"
-+  // instead of erroring, producing an object file that references a symbol
-+  // ("memset.1") nothing ever defines.
-+  private val globalsByName = mutable.Map.empty[String, LLVMValueRef]
-+  private val hoistedConsts = mutable.Map.empty[nir.Val, LLVMValueRef]
-+  private var constCounter = 0
-+
-+  // Exception handling. Two personality/landingpad shapes, selected exactly
-+  // like UnixCompat (config.usingCppExceptions): the default ScalaNative
-+  // catch-all (UnixCompat.genScalaNativeLandingPad), and the C++-interop one
-+  // (UnixCompat.genCppLandingPad, __gxx_personality_v0 + __cxa_begin/end_catch
-+  // against the scalanative.ExceptionWrapper RTTI). All declared directly by
-+  // hardcoded name, bypassing `env`/`globalValueFor`, exactly like
-+  // UnixCompat.genPrelude does.
-+  private val usingCppExceptions = config.usingCppExceptions
-+  private lazy val excRecTy: LLVMTypeRef =
-+    llvmType(nir.Type.StructValue(Seq(nir.Type.Ptr, nir.Type.Int)))
-+  private lazy val personalityFn: LLVMValueRef = {
-+    val fnTy = Zone.acquire { implicit z =>
-+      C.LLVMFunctionType(llvmType(nir.Type.Int), alloc[LLVMTypeRef](0), 0.toUInt, 1)
-+    }
-+    val name = if (usingCppExceptions) "__gxx_personality_v0" else "scalanative_personality"
-+    Zone.acquire(implicit z => C.LLVMAddFunction(module, toCString(name), fnTy))
-+  }
-+  private lazy val scalanativeCatchFnTy: LLVMTypeRef =
-+    Zone.acquire { implicit z =>
-+      val args = alloc[LLVMTypeRef](1)
-+      args(0) = ptrTy
-+      C.LLVMFunctionType(ptrTy, args, 1.toUInt, 0)
-+    }
-+  private lazy val scalanativeCatchFn: LLVMValueRef =
-+    Zone.acquire(implicit z => C.LLVMAddFunction(module, toCString("scalanative_catch"), scalanativeCatchFnTy))
-+
-+  // C++-interop-only exception plumbing (UnixCompat.genCppLandingPad).
-+  private lazy val cppExceptionWrapperGlobal: LLVMValueRef =
-+    // `external constant { ptr, ptr, ptr }` in AbstractCodeGen's typed-pointer
-+    // form; under opaque pointers (a whole-build gate here) the type of an
-+    // external symbol we never dereference directly doesn't matter to LLVM,
-+    // so declaring it simply as an opaque `ptr` global is equivalent -- we
-+    // only ever take its address as a landingpad clause / typeid argument.
-+    Zone.acquire(implicit z => C.LLVMAddGlobal(module, ptrTy, toCString("_ZTIN11scalanative16ExceptionWrapperE")))
-+  private lazy val ehTypeidForFnTy: LLVMTypeRef =
-+    Zone.acquire { implicit z =>
-+      val args = alloc[LLVMTypeRef](1)
-+      args(0) = ptrTy
-+      C.LLVMFunctionType(llvmType(nir.Type.Int), args, 1.toUInt, 0)
-+    }
-+  private lazy val ehTypeidForFn: LLVMValueRef =
-+    // Overloaded intrinsic (parametric on its pointer arg's address space) --
-+    // needs its fully mangled name here for the same reason `mangledName`
-+    // special-cases llvm.stacksave/stackrestore: building the module
-+    // directly via LLVM-C bypasses clang's parser-level
-+    // LLVMUpgradeIntrinsicFunction auto-upgrade of the plain/legacy name.
-+    Zone.acquire(implicit z => C.LLVMAddFunction(module, toCString("llvm.eh.typeid.for.p0"), ehTypeidForFnTy))
-+  private lazy val cxaBeginCatchFnTy: LLVMTypeRef =
-+    Zone.acquire { implicit z =>
-+      val args = alloc[LLVMTypeRef](1)
-+      args(0) = ptrTy
-+      C.LLVMFunctionType(ptrTy, args, 1.toUInt, 0)
-+    }
-+  private lazy val cxaBeginCatchFn: LLVMValueRef =
-+    Zone.acquire(implicit z => C.LLVMAddFunction(module, toCString("__cxa_begin_catch"), cxaBeginCatchFnTy))
-+  private lazy val cxaEndCatchFnTy: LLVMTypeRef =
-+    Zone.acquire(implicit z => C.LLVMFunctionType(C.LLVMVoidTypeInContext(ctx), alloc[LLVMTypeRef](0), 0.toUInt, 0))
-+  private lazy val cxaEndCatchFn: LLVMValueRef =
-+    Zone.acquire(implicit z => C.LLVMAddFunction(module, toCString("__cxa_end_catch"), cxaEndCatchFnTy))
-+
-+  // Debug info (Phase 3): a deliberately narrower port than
-+  // MetadataCodeGen.scala -- one DICompileUnit+DIFile per source file, one
-+  // DISubprogram per function (with an opaque/unspecified subroutine type:
-+  // `LLVMDIBuilderCreateSubroutineType(..., null, 0, ...)`, valid DWARF for
-+  // "parameter types not described"), and a plain !dbg location (function
-+  // scope only, no lexical-block nesting) set on the builder before every
-+  // instruction. This is enough for line-accurate backtraces/symbolication
-+  // (what Phase 5's differential validation actually checks) without porting
-+  // MetadataCodeGen's ~1000 lines of DICompositeType-per-class/array/struct
-+  // machinery, which only matters to an interactive debugger inspecting
-+  // variable values -- not to program behavior. `generateLocalVariables`
-+  // (dbgLocalValue/dbgLocalVariable, llvm.dbg.declare/value) is left
-+  // unported for the same reason: a real, known, documented fidelity gap,
-+  // not a fallback trigger.
-+  private val debugInfoEnabled = config.compilerConfig.sourceLevelDebuggingConfig.enabled
-+  private lazy val diBuilder: LLVMDIBuilderRef = DI.LLVMCreateDIBuilder(module)
+   private val ptrTy: LLVMTypeRef = C.LLVMPointerTypeInContext(ctx, 0.toUInt)
+   private val typeCache = mutable.Map.empty[nir.Type, LLVMTypeRef]
+   // Functions and global vars/consts, keyed by their NIR name. Populated as
+@@ -274,21 +286,22 @@ private[direct] final class DirectCodeGen(
+   // not a fallback trigger.
+   private val debugInfoEnabled = config.compilerConfig.sourceLevelDebuggingConfig.enabled
+   private lazy val diBuilder: LLVMDIBuilderRef = DI.LLVMCreateDIBuilder(module)
+-  private val diFileCache = mutable.Map.empty[(String, String), LLVMMetadataRef]
 +  private val diFileCache = mutable.Map.empty[nir.SourceFile, LLVMMetadataRef]
-+
-+  private def diFileFor(pos: nir.SourcePosition): LLVMMetadataRef = {
-+    diFileCache.getOrElseUpdate(
+ 
+   private def diFileFor(pos: nir.SourcePosition): LLVMMetadataRef = {
+-    val filename = pos.source.filename.getOrElse("unknown")
+-    val directory = pos.source.directory.getOrElse("")
+     diFileCache.getOrElseUpdate(
+-      (filename, directory),
+-      Zone.acquire { implicit z =>
+-        DI.LLVMDIBuilderCreateFile(
+-          diBuilder,
+-          toCString(filename),
+-          filename.length.toUSize,
+-          toCString(directory),
+-          directory.length.toUSize
+-        )
 +      pos.source, {
 +        val filename = pos.source.filename.getOrElse("unknown")
 +        val directory = pos.source.directory.getOrElse("")
@@ -308,100 +53,13 @@ index 0000000..99d31d0
 +            directory.length.toUSize
 +          )
 +        }
-+      }
-+    )
-+  }
-+
-+  private def diCompileUnitFor(file: LLVMMetadataRef): LLVMMetadataRef =
-+    diCompileUnitCache.getOrElseUpdate(
-+      file,
-+      Zone.acquire { implicit z =>
-+        val producer = "scalino-direct"
-+        val emptyStr = toCString("")
-+        DI.LLVMDIBuilderCreateCompileUnit(
-+          diBuilder,
-+          LLVMDWARFSourceLanguageC_plus_plus,
-+          file,
-+          toCString(producer),
-+          producer.length.toUSize,
-+          0,
-+          emptyStr,
-+          0.toUSize,
-+          0.toUInt,
-+          emptyStr,
-+          0.toUSize,
-+          LLVMDWARFEmissionFull,
-+          0.toUInt,
-+          0,
-+          0,
-+          emptyStr,
-+          0.toUSize,
-+          emptyStr,
-+          0.toUSize
-+        )
-+      }
-+    )
-+  private val diCompileUnitCache = mutable.Map.empty[LLVMMetadataRef, LLVMMetadataRef]
-+
-+  /** One DISubprogram per NIR function, attached via LLVMSetSubprogram --
-+   *  mirrors MetadataCodeGen.DefnScopes.getDISubprogramScope, minus the
-+   *  linkage-name FQCN-on-Windows special case (Windows is out of scope
-+   *  here) and minus real parameter/return types (opaque subroutine type,
-+   *  see `debugInfo`'s doc comment).
-+   */
-+  private def diSubprogramFor(defn: nir.Defn.Define, mangledName: String): LLVMMetadataRef = {
-+    val pos = defn.pos
-+    val file = diFileFor(pos)
-+    val unit = diCompileUnitFor(file)
-+    val subroutineTy =
-+      DI.LLVMDIBuilderCreateSubroutineType(diBuilder, file, null, 0.toUInt, LLVMDIFlagZero)
-+    val name = defn.name.mangle
-+    val line = pos.sourceLine.toUInt
-+    Zone.acquire { implicit z =>
-+      DI.LLVMDIBuilderCreateFunction(
-+        diBuilder,
-+        unit,
-+        toCString(name),
-+        name.length.toUSize,
-+        toCString(mangledName),
-+        mangledName.length.toUSize,
-+        file,
-+        line,
-+        subroutineTy,
-+        0,
-+        1,
-+        line,
-+        LLVMDIFlagZero,
-+        0
-+      )
-+    }
-+  }
-+
-+  // Always attaches a location when debug info is on -- even for a
-+  // synthetic/undefined-position inst (line 0, col 0, a real LLVM convention
-+  // for "no source line but still in scope") -- never leaves the builder's
-+  // current debug location unset/stale. A stale location matters here
-+  // because buildLandingPad's `LLVMBuildCall2`s (__cxa_begin_catch and
-+  // friends) run under whatever location this last set, positioned into
-+  // blocks of their own; if the very first inst this function ever calls it
-+  // for has an undefined pos (real for compiler-synthesized code), skipping
-+  // the set left the builder's location at its initial null -- and a call in
-+  // a function that has debug info (LLVMSetSubprogram was called) must carry
-+  // a !dbg location, or LLVM's verifier rejects the whole module with
-+  // "inlinable function call in a function with debug info must have a !dbg
-+  // location" -- which used to silently fall the WHOLE partition back to
-+  // .ll+clang (DirectCodeGen.emit's catch-all NonFatal handler).
-+  private def setDebugLoc(builder: LLVMBuilderRef, scope: LLVMMetadataRef, pos: nir.SourcePosition): Unit =
-+    if (debugInfoEnabled) {
-+      val line = if (pos.isDefined) pos.sourceLine.toUInt else 0.toUInt
-+      val col = if (pos.isDefined) pos.sourceColumn.toUInt else 0.toUInt
-+      val loc = DI.LLVMDIBuilderCreateDebugLocation(ctx, line, col, scope, null)
-+      DI.LLVMSetCurrentDebugLocation2(builder, loc)
-+    }
-+
-+  private def appendBB(fn: LLVMValueRef, name: String): LLVMBasicBlockRef =
-+    Zone.acquire(implicit z => C.LLVMAppendBasicBlockInContext(ctx, fn, toCString(name)))
-+
+       }
+     )
+   }
+@@ -383,6 +396,16 @@ private[direct] final class DirectCodeGen(
+   private def appendBB(fn: LLVMValueRef, name: String): LLVMBasicBlockRef =
+     Zone.acquire(implicit z => C.LLVMAppendBasicBlockInContext(ctx, fn, toCString(name)))
+ 
 +  // Same as `appendBB`, but threading an ALREADY-open Zone in instead of
 +  // opening a fresh one -- for call sites (buildLandingPad) that make
 +  // several small Zone-scoped allocations per call and used to pay for a
@@ -412,18 +70,13 @@ index 0000000..99d31d0
 +  ): LLVMBasicBlockRef =
 +    C.LLVMAppendBasicBlockInContext(ctx, fn, toCString(name))
 +
-+  private def llvmOrdering(o: nir.MemoryOrder): CInt = o match {
-+    case nir.MemoryOrder.Unordered => LLVMAtomicOrderingUnordered
-+    case nir.MemoryOrder.Monotonic => LLVMAtomicOrderingMonotonic
-+    case nir.MemoryOrder.Acquire   => LLVMAtomicOrderingAcquire
-+    case nir.MemoryOrder.Release   => LLVMAtomicOrderingRelease
-+    case nir.MemoryOrder.AcqRel    => LLVMAtomicOrderingAcquireRelease
-+    case nir.MemoryOrder.SeqCst    => LLVMAtomicOrderingSequentiallyConsistent
-+  }
-+
-+  private def unsupported(what: Any): Nothing =
-+    throw Unsupported(what.toString)
-+
+   private def llvmOrdering(o: nir.MemoryOrder): CInt = o match {
+     case nir.MemoryOrder.Unordered => LLVMAtomicOrderingUnordered
+     case nir.MemoryOrder.Monotonic => LLVMAtomicOrderingMonotonic
+@@ -395,6 +418,23 @@ private[direct] final class DirectCodeGen(
+   private def unsupported(what: Any): Nothing =
+     throw Unsupported(what.toString)
+ 
 +  // `xs.zipWithIndex.foreach { case (x, i) => ... }` builds a fresh Tuple2
 +  // per element (`zipWithIndex`) on top of the closure allocation `foreach`
 +  // already needs -- profiled as the dominant per-instruction allocation
@@ -441,353 +94,103 @@ index 0000000..99d31d0
 +    }
 +  }
 +
-+  /** The value arguments a `Next` passes to its target block's params.
-+   *  `Next.Label` carries them directly; `Case`/`Unwind` wrap another `Next`
-+   *  (recursively) and carry none of their own -- mirrors how `Next.id`
-+   *  itself recurses through these wrappers.
-+   */
-+  private def nextArgs(next: nir.Next): Seq[nir.Val] = next match {
-+    case nir.Next.Label(_, args)   => args
-+    case nir.Next.Case(_, inner)   => nextArgs(inner)
-+    case nir.Next.Unwind(_, inner) => nextArgs(inner)
-+    case nir.Next.None             => Seq.empty
-+  }
-+
-+  private def mangledName(g: nir.Global): String = g match {
-+    case nir.Global.Member(_, sig) if sig.isExtern =>
-+      val nir.Sig.Extern(id) = sig.unmangled: @unchecked
-+      // A handful of LLVM intrinsics are overloaded (parametric on an
-+      // address-space-qualified pointer type) and must be declared under
-+      // their fully name-mangled form (`.p0` = address space 0) -- textual
-+      // `.ll` gets away with the plain form because clang's *parser*
-+      // silently auto-upgrades legacy/unmangled intrinsic names
-+      // (LLVMUpgradeIntrinsicFunction) as it reads them; building the
-+      // module directly via the C API bypasses that parser entirely, so
-+      // LLVMVerifyModule rejects the unmangled form outright ("Intrinsic
-+      // name not mangled correctly for type arguments!"). Add more cases
-+      // here if/when another overloaded intrinsic surfaces the same way.
-+      id match {
-+        case "llvm.stacksave"    => "llvm.stacksave.p0"
-+        case "llvm.stackrestore" => "llvm.stackrestore.p0"
-+        case other               => other
-+      }
-+    case _ => "_S" + g.mangle
-+  }
-+
-+  // ---- types ----------------------------------------------------------
-+
-+  private def llvmType(ty: nir.Type): LLVMTypeRef =
-+    typeCache.getOrElseUpdate(ty, ty match {
-+      case nir.Type.Unit => C.LLVMVoidTypeInContext(ctx)
-+      case _: nir.Type.RefKind | nir.Type.Ptr | nir.Type.Nothing => ptrTy
-+      case nir.Type.Bool => C.LLVMIntTypeInContext(ctx, 1.toUInt)
-+      case i: nir.Type.FixedSizeI => C.LLVMIntTypeInContext(ctx, i.width.toUInt)
-+      case nir.Type.Size =>
-+        C.LLVMIntTypeInContext(ctx, platform.sizeOfPtrBits.toUInt)
-+      case nir.Type.Float => C.LLVMFloatTypeInContext(ctx)
-+      case nir.Type.Double => C.LLVMDoubleTypeInContext(ctx)
-+      case nir.Type.ArrayValue(elem, n) =>
-+        C.LLVMArrayType2(llvmType(elem), n.toULong)
-+      case nir.Type.StructValue(tys) =>
-+        Zone.acquire { implicit z =>
-+          val arr = alloc[LLVMTypeRef](tys.length.max(1))
+   /** The value arguments a `Next` passes to its target block's params.
+    *  `Next.Label` carries them directly; `Case`/`Unwind` wrap another `Next`
+    *  (recursively) and carry none of their own -- mirrors how `Next.id`
+@@ -445,7 +485,7 @@ private[direct] final class DirectCodeGen(
+       case nir.Type.StructValue(tys) =>
+         Zone.acquire { implicit z =>
+           val arr = alloc[LLVMTypeRef](tys.length.max(1))
+-          tys.zipWithIndex.foreach { case (t, i) => arr(i) = llvmType(t) }
 +          foreachIndexed(tys) { (t, i) => arr(i) = llvmType(t) }
-+          C.LLVMStructTypeInContext(ctx, arr, tys.length.toUInt, 0)
-+        }
-+      case fnTy: nir.Type.Function => functionType(fnTy)
-+      case other                   => unsupported(other)
-+    })
-+
-+  private def functionType(fnTy: nir.Type.Function): LLVMTypeRef = {
-+    val nir.Type.Function(rawArgs, ret) = fnTy
-+    val isVarArg = rawArgs.contains(nir.Type.Vararg)
-+    val args = rawArgs.filterNot(_ == nir.Type.Vararg)
-+    Zone.acquire { implicit z =>
-+      val arr = alloc[LLVMTypeRef](args.length.max(1))
+           C.LLVMStructTypeInContext(ctx, arr, tys.length.toUInt, 0)
+         }
+       case fnTy: nir.Type.Function => functionType(fnTy)
+@@ -458,7 +498,7 @@ private[direct] final class DirectCodeGen(
+     val args = rawArgs.filterNot(_ == nir.Type.Vararg)
+     Zone.acquire { implicit z =>
+       val arr = alloc[LLVMTypeRef](args.length.max(1))
+-      args.zipWithIndex.foreach { case (t, i) => arr(i) = llvmType(t) }
 +      foreachIndexed(args) { (t, i) => arr(i) = llvmType(t) }
-+      C.LLVMFunctionType(llvmType(ret), arr, args.length.toUInt, if (isVarArg) 1 else 0)
-+    }
-+  }
-+
-+  // ---- constant / value materialization --------------------------------
-+  // Handles both true top-level constants (no builder) and operands used
-+  // inside a function body (builder present, `locals` populated) -- LLVM
-+  // constants are valid in either position, so one function covers both,
-+  // matching how AbstractCodeGen's genVal/genJustVal are used uniformly in
-+  // both contexts.
-+
-+  private def constFor(v: nir.Val): LLVMValueRef =
-+    hoistedConsts.getOrElseUpdate(
-+      v, {
-+        val inner = valueOf(v, locals = null)
-+        val ty = llvmType(v.ty)
-+        val name = s"__const$constCounter"
-+        constCounter += 1
-+        Zone.acquire { implicit z =>
-+          val g = C.LLVMAddGlobal(module, ty, toCString(name))
-+          C.LLVMSetInitializer(g, inner)
-+          C.LLVMSetGlobalConstant(g, 1)
-+          C.LLVMSetLinkage(g, LLVMPrivateLinkage)
-+          g
-+        }
-+      }
-+    )
-+
-+  /** `locals == null` means "constant-only context" (top-level Const/Var
-+   *  initializer, or a value nested inside one) -- `Val.Local` there is a
-+   *  NIR-invariant violation, not something we need to fall back for.
-+   */
-+  private def valueOf(
-+      v: nir.Val,
+       C.LLVMFunctionType(llvmType(ret), arr, args.length.toUInt, if (isVarArg) 1 else 0)
+     }
+   }
+@@ -493,7 +533,7 @@ private[direct] final class DirectCodeGen(
+    */
+   private def valueOf(
+       v: nir.Val,
+-      locals: mutable.Map[nir.Local, LLVMValueRef]
 +      locals: mutable.LongMap[LLVMValueRef]
-+  ): LLVMValueRef = v match {
-+    case nir.Val.True  => C.LLVMConstInt(llvmType(nir.Type.Bool), 1L.toULong, 0)
-+    case nir.Val.False => C.LLVMConstInt(llvmType(nir.Type.Bool), 0L.toULong, 0)
-+    case nir.Val.Null  => C.LLVMConstNull(ptrTy)
-+    case nir.Val.Zero(ty) => C.LLVMConstNull(llvmType(ty))
-+    case nir.Val.Size(n) => C.LLVMConstInt(llvmType(nir.Type.Size), n.toULong, 1)
-+    case nir.Val.Char(c) => C.LLVMConstInt(llvmType(nir.Type.Char), c.toLong.toULong, 0)
-+    case nir.Val.Byte(n) => C.LLVMConstInt(llvmType(nir.Type.Byte), n.toLong.toULong, 1)
-+    case nir.Val.Short(n) => C.LLVMConstInt(llvmType(nir.Type.Short), n.toLong.toULong, 1)
-+    case nir.Val.Int(n) => C.LLVMConstInt(llvmType(nir.Type.Int), n.toLong.toULong, 1)
-+    case nir.Val.Long(n) => C.LLVMConstInt(llvmType(nir.Type.Long), n.toULong, 1)
-+    case nir.Val.Float(n) => C.LLVMConstReal(llvmType(nir.Type.Float), n.toDouble)
-+    case nir.Val.Double(n) => C.LLVMConstReal(llvmType(nir.Type.Double), n)
-+    case nir.Val.StructValue(vs) =>
-+      Zone.acquire { implicit z =>
-+        val arr = alloc[LLVMValueRef](vs.length.max(1))
+   ): LLVMValueRef = v match {
+     case nir.Val.True  => C.LLVMConstInt(llvmType(nir.Type.Bool), 1L.toULong, 0)
+     case nir.Val.False => C.LLVMConstInt(llvmType(nir.Type.Bool), 0L.toULong, 0)
+@@ -510,13 +550,13 @@ private[direct] final class DirectCodeGen(
+     case nir.Val.StructValue(vs) =>
+       Zone.acquire { implicit z =>
+         val arr = alloc[LLVMValueRef](vs.length.max(1))
+-        vs.zipWithIndex.foreach { case (v, i) => arr(i) = valueOf(v, locals) }
 +        foreachIndexed(vs) { (v, i) => arr(i) = valueOf(v, locals) }
-+        C.LLVMConstStructInContext(ctx, arr, vs.length.toUInt, 0)
-+      }
-+    case nir.Val.ArrayValue(elemty, vs) =>
-+      Zone.acquire { implicit z =>
-+        val arr = alloc[LLVMValueRef](vs.length.max(1))
+         C.LLVMConstStructInContext(ctx, arr, vs.length.toUInt, 0)
+       }
+     case nir.Val.ArrayValue(elemty, vs) =>
+       Zone.acquire { implicit z =>
+         val arr = alloc[LLVMValueRef](vs.length.max(1))
+-        vs.zipWithIndex.foreach { case (v, i) => arr(i) = valueOf(v, locals) }
 +        foreachIndexed(vs) { (v, i) => arr(i) = valueOf(v, locals) }
-+        C.LLVMConstArray2(llvmType(elemty), arr, vs.length.toLong.toULong)
-+      }
-+    case bs: nir.Val.ByteString =>
-+      Zone.acquire { implicit z =>
-+        val bytes = bs.bytes
-+        val buf = alloc[CChar]((bytes.length + 1).max(1))
-+        var i = 0
-+        while (i < bytes.length) { buf(i) = bytes(i); i += 1 }
-+        buf(bytes.length) = 0.toByte
-+        // byteCount (bytes.length + 1) includes the null terminator we just
-+        // wrote, matching Val.ByteString.ty = ArrayValue(Byte, byteCount);
-+        // dontNullTerminate=1 so LLVM doesn't also append its own.
-+        C.LLVMConstStringInContext(ctx, buf, (bytes.length + 1).toUInt, 1)
-+      }
-+    case nir.Val.Local(id, _) =>
-+      if (locals eq null) unsupported(v)
+         C.LLVMConstArray2(llvmType(elemty), arr, vs.length.toLong.toULong)
+       }
+     case bs: nir.Val.ByteString =>
+@@ -533,7 +573,7 @@ private[direct] final class DirectCodeGen(
+       }
+     case nir.Val.Local(id, _) =>
+       if (locals eq null) unsupported(v)
+-      else locals.getOrElse(id, unsupported(v))
 +      else locals.getOrElse(id.id, unsupported(v))
-+    case nir.Val.Global(name: nir.Global.Member, _) =>
-+      globalValueFor(name)
-+    case nir.Val.Const(inner) =>
-+      constFor(inner)
-+    case nir.Val.Unit =>
-+      unsupported(v) // never used as a value operand
-+    case other => unsupported(other)
-+  }
-+
-+  /** Like [[valueOf]], but for a position where NIR (mirroring how
-+   *  AbstractCodeGen's *text* syntax works) shares one declared type across
-+   *  several operands rather than stamping each one individually -- a
-+   *  binary op's two operands (`and i64 %x, 63`: the literal `63` inherits
-+   *  `i64` from the instruction, it isn't independently typed `i32`) and a
-+   *  phi's incoming values (`phi i64 [ %a, %bb1 ], [ %b, %bb2 ]`: same
-+   *  sharing). A numeric literal's own NIR-case width (`Val.Int` is always
-+   *  32-bit, etc.) can legitimately be narrower than that shared type, so
-+   *  building it via plain `valueOf` would produce a value of the wrong
-+   *  width and fail LLVM's verifier ("operands ... not of the same type",
-+   *  observed on exactly this: a shift/mask literal built as i32 inside an
-+   *  i64 op). Non-literal values (locals, globals, ...) already carry a
-+   *  concrete, correct LLVM type from wherever they were produced, so they
-+   *  fall through to plain `valueOf` unchanged.
-+   */
-+  private def valueOfAt(
-+      v: nir.Val,
-+      ty: nir.Type,
+     case nir.Val.Global(name: nir.Global.Member, _) =>
+       globalValueFor(name)
+     case nir.Val.Const(inner) =>
+@@ -561,7 +601,7 @@ private[direct] final class DirectCodeGen(
+   private def valueOfAt(
+       v: nir.Val,
+       ty: nir.Type,
+-      locals: mutable.Map[nir.Local, LLVMValueRef]
 +      locals: mutable.LongMap[LLVMValueRef]
-+  ): LLVMValueRef = v match {
-+    case nir.Val.True     => C.LLVMConstInt(llvmType(ty), 1L.toULong, 1)
-+    case nir.Val.False    => C.LLVMConstInt(llvmType(ty), 0L.toULong, 1)
-+    case nir.Val.Zero(_)  => C.LLVMConstInt(llvmType(ty), 0L.toULong, 1)
-+    case nir.Val.Size(n)  => C.LLVMConstInt(llvmType(ty), n.toULong, 1)
-+    case nir.Val.Char(c)  => C.LLVMConstInt(llvmType(ty), c.toLong.toULong, 1)
-+    case nir.Val.Byte(n)  => C.LLVMConstInt(llvmType(ty), n.toLong.toULong, 1)
-+    case nir.Val.Short(n) => C.LLVMConstInt(llvmType(ty), n.toLong.toULong, 1)
-+    case nir.Val.Int(n)   => C.LLVMConstInt(llvmType(ty), n.toLong.toULong, 1)
-+    case nir.Val.Long(n)  => C.LLVMConstInt(llvmType(ty), n.toULong, 1)
-+    case _                => valueOf(v, locals)
-+  }
-+
-+  /** Resolves (declaring an extern stub if needed) the LLVMValueRef for a
-+   *  global/function reference, mirroring AbstractCodeGen's `touch`+`lookup`
-+   *  + the deferred `genDeps` pass -- except here we declare eagerly, on
-+   *  first reference, since we don't need a separate textual "forward decl"
-+   *  section.
-+   */
-+  private def globalValueFor(name: nir.Global.Member): LLVMValueRef =
-+    globals.getOrElse(
-+      name, {
-+        val mangled = mangledName(name)
-+        globalsByName.get(mangled) match {
-+          case Some(existing) =>
-+            globals(name) = existing
-+            existing
-+          case None =>
-+            val defn = env.getOrElse(name, unsupported(name))
-+            // Var/Const: AbstractCodeGen's text form only uses the *declared*
-+            // `ty` for an extern global (no initializer to derive one from --
-+            // genType(ty)); a defined (non-extern) global instead takes its
-+            // type from the *initializer* (genVal(rhs), which types itself off
-+            // rhs.ty) -- the declared field type and the initializer's own type
-+            // are allowed to differ in NIR (observed on a resource-embedder
-+            // synthetic global), so using the declared one unconditionally
-+            // produced a global whose type didn't match its own initializer
-+            // ("Global variable initializer type does not match global variable
-+            // type!").
-+            val (v, isExtern) = defn match {
-+              case nir.Defn.Var(attrs, _, ty, rhs) =>
-+                val llTy = if (attrs.isExtern) llvmType(ty) else llvmType(rhs.ty)
-+                (Zone.acquire(implicit z => C.LLVMAddGlobal(module, llTy, toCString(mangled))), attrs.isExtern)
-+              case nir.Defn.Const(attrs, _, ty, rhs) =>
-+                val llTy = if (attrs.isExtern) llvmType(ty) else llvmType(rhs.ty)
-+                (Zone.acquire(implicit z => C.LLVMAddGlobal(module, llTy, toCString(mangled))), attrs.isExtern)
-+              case nir.Defn.Declare(attrs, _, ty) =>
-+                (Zone.acquire(implicit z => C.LLVMAddFunction(module, toCString(mangled), functionType(ty))), attrs.isExtern)
-+              case nir.Defn.Define(attrs, _, ty, _, _) =>
-+                (Zone.acquire(implicit z => C.LLVMAddFunction(module, toCString(mangled), functionType(ty))), attrs.isExtern)
-+              case other => unsupported(other)
-+            }
-+            // Matches the `.ll` + clang path: `-fvisibility=hidden` (LLVM.scala)
-+            // plus AbstractCodeGen's explicit "hidden" keyword for non-extern
-+            // top-level defs -- only names meant to cross a linkage-unit
-+            // boundary (isExtern) keep default visibility.
-+            C.LLVMSetVisibility(v, if (isExtern) LLVMDefaultVisibility else LLVMHiddenVisibility)
-+            // Matches AbstractCodeGen's `isThreadLocal` -- a single hardcoded
-+            // name check, not a general NIR attribute (see its comment:
-+            // "Currently we have a single usage for interaction with GC").
-+            if (isExtern && name == Lower.GCYieldPointTrapName &&
-+                platform.isMultithreadingEnabled && platform.useGCYieldPointTraps)
-+              C.LLVMSetThreadLocal(v, 1)
-+            globals(name) = v
-+            globalsByName(mangled) = v
-+            v
-+        }
-+      }
-+    )
-+
-+  // ---- top-level definitions -------------------------------------------
-+
-+  private def emitTo(objPath: Path): Unit = {
-+    defns.foreach { case d: nir.Defn.Const => predeclare(d.name); case _ => () }
-+    defns.foreach { case d: nir.Defn.Var => predeclare(d.name); case _ => () }
-+    defns.foreach { case d: nir.Defn.Declare => predeclare(d.name); case _ => () }
-+    defns.foreach { case d: nir.Defn.Define => predeclare(d.name); case _ => () }
-+
-+    defns.foreach {
-+      case d: nir.Defn.Const if !d.attrs.isExtern => genGlobalDefn(d.name, isConst = true, d.rhs)
-+      case d: nir.Defn.Var if !d.attrs.isExtern   => genGlobalDefn(d.name, isConst = false, d.rhs)
-+      case _: nir.Defn.Const | _: nir.Defn.Var =>
-+        () // extern: declared (globalValueFor, via predeclare above), no initializer to fill in
-+      case _: nir.Defn.Declare => () // signature-only, nothing to fill in
-+      // Defn.Define always carries a real body regardless of attrs.isExtern
-+      // (that flag only affects the symbol's name/mangling here, unlike for
-+      // Var/Const above) -- an extern-with-no-body is a Defn.Declare instead.
-+      case d: nir.Defn.Define => genFunctionBody(d)
-+      case other => unsupported(other)
-+    }
-+
-+    if (debugInfoEnabled) {
-+      // Module flag first: without it LLVM's verifier-invoked
-+      // UpgradeDebugInfo silently strips every !dbg attachment (a warning,
-+      // not a verification failure) if the version doesn't match what this
-+      // LLVM's IR expects -- matches AbstractCodeGen's own
-+      // "Debug Info Version" module flag (AbstractCodeGen.scala:100).
-+      Zone.acquire { implicit z =>
-+        val key = "Debug Info Version"
-+        val versionConst = C.LLVMConstInt(C.LLVMIntTypeInContext(ctx, 32.toUInt), 3L.toULong, 0)
-+        val versionMD = DI.LLVMValueAsMetadata(versionConst)
-+        C.LLVMAddModuleFlag(module, LLVMModuleFlagBehaviorWarning, toCString(key), key.length.toUSize, versionMD)
-+      }
-+      DI.LLVMDIBuilderFinalize(diBuilder)
-+      DI.LLVMDisposeDIBuilder(diBuilder)
-+    }
-+
-+    Zone.acquire { implicit z =>
-+      val errMsg = alloc[CString](1)
-+      if (A.LLVMVerifyModule(module, LLVMReturnStatusAction, errMsg) != 0) {
-+        val msg = if (errMsg(0) == null) "<no message>" else fromCString(errMsg(0))
-+        C.LLVMDisposeModule(module)
-+        C.LLVMContextDispose(ctx)
-+        unsupported(s"module verification failed: $msg")
-+      }
-+    }
-+
-+    emitObjectFile(objPath)
-+    C.LLVMDisposeModule(module)
-+    C.LLVMContextDispose(ctx)
-+  }
-+
-+  private def predeclare(name: nir.Global): Unit = name match {
-+    case m: nir.Global.Member if !globals.contains(m) =>
-+      globalValueFor(m)
-+      ()
-+    case _ => ()
-+  }
-+
-+  private def genGlobalDefn(
-+      name: nir.Global.Member,
-+      isConst: Boolean,
-+      rhs: nir.Val
-+  ): Unit = {
-+    val g = globalValueFor(name)
-+    val init = valueOf(rhs, locals = null)
-+    C.LLVMSetInitializer(g, init)
-+    if (isConst) C.LLVMSetGlobalConstant(g, 1)
-+  }
-+
-+  private def genFunctionBody(defn: nir.Defn.Define): Unit = {
-+    val fn = globalValueFor(defn.name)
-+    // Attached unconditionally, matching AbstractCodeGen (`str(os.gxxPersonality)`
-+    // is emitted for every Defn.Define regardless of whether it actually
-+    // contains an invoke) -- LLVM allows a personality on a function with no
-+    // landingpads at all.
-+    C.LLVMSetPersonalityFn(fn, personalityFn)
-+    val diScope: LLVMMetadataRef =
-+      if (debugInfoEnabled) {
-+        val sp = diSubprogramFor(defn, mangledName(defn.name))
-+        DI.LLVMSetSubprogram(fn, sp)
-+        sp
-+      } else null
-+    val cfg = CFG(defn.insts)
-+    val builder = C.LLVMCreateBuilderInContext(ctx)
+   ): LLVMValueRef = v match {
+     case nir.Val.True     => C.LLVMConstInt(llvmType(ty), 1L.toULong, 1)
+     case nir.Val.False    => C.LLVMConstInt(llvmType(ty), 0L.toULong, 1)
+@@ -717,12 +757,12 @@ private[direct] final class DirectCodeGen(
+       } else null
+     val cfg = CFG(defn.insts)
+     val builder = C.LLVMCreateBuilderInContext(ctx)
+-    val locals = mutable.Map.empty[nir.Local, LLVMValueRef]
 +    val locals = mutable.LongMap.empty[LLVMValueRef]
-+    // The FIRST LLVM basic block of each NIR block -- always the target of a
-+    // Jump/If/Switch/phi-placement point, matching AbstractCodeGen's
-+    // genNext, which always branches to "<id>.0" (AbstractCodeGen.scala:1274,
-+    // 1282), never to a later split.
+     // The FIRST LLVM basic block of each NIR block -- always the target of a
+     // Jump/If/Switch/phi-placement point, matching AbstractCodeGen's
+     // genNext, which always branches to "<id>.0" (AbstractCodeGen.scala:1274,
+     // 1282), never to a later split.
+-    val blockEntry = mutable.Map.empty[nir.Local, LLVMBasicBlockRef]
 +    val blockEntry = mutable.LongMap.empty[LLVMBasicBlockRef]
-+    // The LAST LLVM basic block of each NIR block -- where that block's own
-+    // terminator lives once every invoke inside it has split it into
-+    // sub-blocks; this is the phi-predecessor for a *regular* incoming edge
-+    // (AbstractCodeGen's genRegularEdge uses `edge.from.splitCount`, i.e.
-+    // exactly the index of this last sub-block). Filled in by genBlock as it
-+    // walks each block's instructions, since the number of splits isn't
-+    // known until an invoke is actually encountered.
+     // The LAST LLVM basic block of each NIR block -- where that block's own
+     // terminator lives once every invoke inside it has split it into
+     // sub-blocks; this is the phi-predecessor for a *regular* incoming edge
+@@ -730,25 +770,32 @@ private[direct] final class DirectCodeGen(
+     // exactly the index of this last sub-block). Filled in by genBlock as it
+     // walks each block's instructions, since the number of splits isn't
+     // known until an invoke is actually encountered.
+-    val blockExit = mutable.Map.empty[nir.Local, LLVMBasicBlockRef]
 +    val blockExit = mutable.LongMap.empty[LLVMBasicBlockRef]
-+    // Keyed by an invoke's exception-value Local (fresh & unique per invoke
-+    // site) -> that invoke's landingpad "succ" block, i.e. the phi
-+    // predecessor for an *unwind* incoming edge (AbstractCodeGen's
-+    // genUnwindEdge uses "%_<exc>.landingpad.succ", AbstractCodeGen.scala:455).
+     // Keyed by an invoke's exception-value Local (fresh & unique per invoke
+     // site) -> that invoke's landingpad "succ" block, i.e. the phi
+     // predecessor for an *unwind* incoming edge (AbstractCodeGen's
+     // genUnwindEdge uses "%_<exc>.landingpad.succ", AbstractCodeGen.scala:455).
+-    val landingpadSucc = mutable.Map.empty[nir.Local, LLVMBasicBlockRef]
 +    val landingpadSucc = mutable.LongMap.empty[LLVMBasicBlockRef]
-+
-+    try {
-+      // Pre-create only the entry sub-block of every NIR block up front
-+      // (needed for forward branches and phi placement); later sub-blocks
-+      // (invoke continuations, landingpads) are created on demand by genBlock
-+      // as it walks that block's own instructions.
+ 
+     try {
+       // Pre-create only the entry sub-block of every NIR block up front
+       // (needed for forward branches and phi placement); later sub-blocks
+       // (invoke continuations, landingpads) are created on demand by genBlock
+       // as it walks that block's own instructions.
 +      // `b.id.id` (raw Long), not `b.id.show`: `Local.show` builds a whole
 +      // NirShowBuilder (ShowBuilder + StringBuilder + toString) per call
 +      // just to render "%<id>" -- with DebugInfo.empty (the only case that
@@ -795,176 +198,238 @@ index 0000000..99d31d0
 +      // exactly `"%" + id`, which profiled as 100% of remaining allocation
 +      // once the prior hotspots were fixed. Called once per block here (and
 +      // once per invoke below), so it scales with the whole function.
-+      cfg.all.foreach { b =>
+       cfg.all.foreach { b =>
+-        blockEntry(b.id) = appendBB(fn, s"${b.id.show}.0")
 +        blockEntry(b.id.id) = appendBB(fn, s"%${b.id.id}.0")
-+      }
-+      // Entry-block params are the function's own parameters, bound
-+      // positionally; non-entry block params become phi nodes.
-+      cfg.all.foreach { b =>
+       }
+       // Entry-block params are the function's own parameters, bound
+       // positionally; non-entry block params become phi nodes.
+       cfg.all.foreach { b =>
+-        C.LLVMPositionBuilderAtEnd(builder, blockEntry(b.id))
 +        C.LLVMPositionBuilderAtEnd(builder, blockEntry(b.id.id))
-+        if (b.isEntry) {
-+          // Uniform, unlike the non-entry (phi) case below: entry params
-+          // are the function's real parameter list positionally, and a
-+          // Unit-typed one (which never actually occurs here in practice)
-+          // would have to be skipped on BOTH sides -- functionType's param
-+          // types and here -- to stay in sync, so there is no analogous
-+          // skip-and-reindex to do; mirrors AbstractCodeGen.genFunctionDefn,
-+          // which binds entry params uniformly too.
+         if (b.isEntry) {
+           // Uniform, unlike the non-entry (phi) case below: entry params
+           // are the function's real parameter list positionally, and a
+@@ -757,16 +804,18 @@ private[direct] final class DirectCodeGen(
+           // types and here -- to stay in sync, so there is no analogous
+           // skip-and-reindex to do; mirrors AbstractCodeGen.genFunctionDefn,
+           // which binds entry params uniformly too.
+-          b.params.zipWithIndex.foreach {
+-            case (nir.Val.Local(id, _), i) =>
+-              locals(id) = C.LLVMGetParam(fn, i.toUInt)
+-            case _ => unsupported(defn)
 +          foreachIndexed(b.params) { (p, i) =>
 +            p match {
 +              case nir.Val.Local(id, _) =>
 +                locals(id.id) = C.LLVMGetParam(fn, i.toUInt)
 +              case _ => unsupported(defn)
 +            }
-+          }
-+        } else {
-+          b.params.foreach {
-+            case nir.Val.Local(id, nir.Type.Unit) => ()
-+            case nir.Val.Local(id, ty) =>
+           }
+         } else {
+           b.params.foreach {
+             case nir.Val.Local(id, nir.Type.Unit) => ()
+             case nir.Val.Local(id, ty) =>
+-              locals(id) = Zone.acquire(implicit z => C.LLVMBuildPhi(builder, llvmType(ty), toCString("")))
 +              locals(id.id) = C.LLVMBuildPhi(builder, llvmType(ty), emptyName)
-+            case _ => unsupported(defn)
-+          }
-+        }
-+      }
-+      cfg.all.foreach(genBlock(_, fn, builder, locals, blockEntry, blockExit, landingpadSucc, diScope))
-+      // Wire up phi incoming edges now that every block's terminator (and
-+      // therefore every producer value) has been emitted.
-+      cfg.all.foreach { b =>
-+        if (!b.isEntry) {
+             case _ => unsupported(defn)
+           }
+         }
+@@ -776,15 +825,16 @@ private[direct] final class DirectCodeGen(
+       // therefore every producer value) has been emitted.
+       cfg.all.foreach { b =>
+         if (!b.isEntry) {
+-          b.params.zipWithIndex.foreach {
+-            case (nir.Val.Local(_, nir.Type.Unit), _) => ()
+-            case (nir.Val.Local(id, ty), n) =>
+-              val phi = locals(id)
 +          foreachIndexed(b.params) { (p, n) =>
 +            p match {
 +            case nir.Val.Local(_, nir.Type.Unit) => ()
 +            case nir.Val.Local(id, ty) =>
 +              val phi = locals(id.id)
-+              val edges = b.inEdges.toSeq
-+              Zone.acquire { implicit z =>
-+                val incomingVals = alloc[LLVMValueRef](edges.length.max(1))
-+                val incomingBlocks = alloc[LLVMBasicBlockRef](edges.length.max(1))
+               val edges = b.inEdges.toSeq
+               Zone.acquire { implicit z =>
+                 val incomingVals = alloc[LLVMValueRef](edges.length.max(1))
+                 val incomingBlocks = alloc[LLVMBasicBlockRef](edges.length.max(1))
+-                edges.zipWithIndex.foreach { case (edge, i) =>
 +                foreachIndexed(edges) { (edge, i) =>
-+                  // valueOfAt, not valueOf: phi incoming values share the
-+                  // phi's one declared type in NIR/text form too (see
-+                  // valueOfAt's doc comment) -- a literal incoming value
-+                  // needs building at `ty`, not its own narrower NIR-case
-+                  // width.
-+                  incomingVals(i) = valueOfAt(nextArgs(edge.next)(n), ty, locals)
-+                  incomingBlocks(i) = edge.next match {
-+                    case nir.Next.Unwind(nir.Val.Local(excId, _), _) =>
+                   // valueOfAt, not valueOf: phi incoming values share the
+                   // phi's one declared type in NIR/text form too (see
+                   // valueOfAt's doc comment) -- a literal incoming value
+@@ -793,14 +843,15 @@ private[direct] final class DirectCodeGen(
+                   incomingVals(i) = valueOfAt(nextArgs(edge.next)(n), ty, locals)
+                   incomingBlocks(i) = edge.next match {
+                     case nir.Next.Unwind(nir.Val.Local(excId, _), _) =>
+-                      landingpadSucc(excId)
 +                      landingpadSucc(excId.id)
-+                    case _ =>
+                     case _ =>
+-                      blockExit(edge.from.id)
 +                      blockExit(edge.from.id.id)
-+                  }
-+                }
-+                C.LLVMAddIncoming(phi, incomingVals, incomingBlocks, edges.length.toUInt)
-+              }
-+            case _ => unsupported(defn)
+                   }
+                 }
+                 C.LLVMAddIncoming(phi, incomingVals, incomingBlocks, edges.length.toUInt)
+               }
+             case _ => unsupported(defn)
 +            }
-+          }
-+        }
-+      }
-+    } finally {
-+      C.LLVMDisposeBuilder(builder)
-+    }
-+  }
-+
-+  private def genBlock(
-+      b: Block,
-+      fn: LLVMValueRef,
-+      builder: LLVMBuilderRef,
+           }
+         }
+       }
+@@ -813,17 +864,17 @@ private[direct] final class DirectCodeGen(
+       b: Block,
+       fn: LLVMValueRef,
+       builder: LLVMBuilderRef,
+-      locals: mutable.Map[nir.Local, LLVMValueRef],
+-      blockEntry: mutable.Map[nir.Local, LLVMBasicBlockRef],
+-      blockExit: mutable.Map[nir.Local, LLVMBasicBlockRef],
+-      landingpadSucc: mutable.Map[nir.Local, LLVMBasicBlockRef],
 +      locals: mutable.LongMap[LLVMValueRef],
 +      blockEntry: mutable.LongMap[LLVMBasicBlockRef],
 +      blockExit: mutable.LongMap[LLVMBasicBlockRef],
 +      landingpadSucc: mutable.LongMap[LLVMBasicBlockRef],
-+      diScope: LLVMMetadataRef
-+  ): Unit = {
-+    // Tracks the sub-block currently being emitted into; advances past an
-+    // invoke's continuation each time one is encountered, mirroring
-+    // AbstractCodeGen's `currentBlockSplit` (AbstractCodeGen.scala:393,
-+    // incremented at 1088/1131).
+       diScope: LLVMMetadataRef
+   ): Unit = {
+     // Tracks the sub-block currently being emitted into; advances past an
+     // invoke's continuation each time one is encountered, mirroring
+     // AbstractCodeGen's `currentBlockSplit` (AbstractCodeGen.scala:393,
+     // incremented at 1088/1131).
+-    var current = blockEntry(b.id)
 +    var current = blockEntry(b.id.id)
-+    C.LLVMPositionBuilderAtEnd(builder, current)
-+
-+    b.insts.foreach { inst =>
-+    setDebugLoc(builder, diScope, inst.pos)
-+    inst match {
-+      case nir.Inst.Let(id, call: nir.Op.Call, unwind: nir.Next.Unwind) =>
-+        val fnTy = functionType(call.ty)
-+        val fnVal = valueOf(call.ptr, locals)
+     C.LLVMPositionBuilderAtEnd(builder, current)
+ 
+     b.insts.foreach { inst =>
+@@ -832,7 +883,7 @@ private[direct] final class DirectCodeGen(
+       case nir.Inst.Let(id, call: nir.Op.Call, unwind: nir.Next.Unwind) =>
+         val fnTy = functionType(call.ty)
+         val fnVal = valueOf(call.ptr, locals)
+-        val contBB = appendBB(fn, s"${b.id.show}.cont")
 +        val contBB = appendBB(fn, s"%${b.id.id}.cont")
-+        // Landingpad content doesn't need the invoke to exist first -- build
-+        // it (and get back its entry block) before the invoke itself.
-+        val excpad = buildLandingPad(fn, builder, locals, blockEntry, landingpadSucc, unwind, diScope)
-+        C.LLVMPositionBuilderAtEnd(builder, current)
-+
-+        val invokeVal = Zone.acquire { implicit z =>
-+          val arr = alloc[LLVMValueRef](call.args.length.max(1))
+         // Landingpad content doesn't need the invoke to exist first -- build
+         // it (and get back its entry block) before the invoke itself.
+         val excpad = buildLandingPad(fn, builder, locals, blockEntry, landingpadSucc, unwind, diScope)
+@@ -840,11 +891,11 @@ private[direct] final class DirectCodeGen(
+ 
+         val invokeVal = Zone.acquire { implicit z =>
+           val arr = alloc[LLVMValueRef](call.args.length.max(1))
+-          call.args.zipWithIndex.foreach { case (a, i) => arr(i) = valueOf(a, locals) }
+-          C.LLVMBuildInvoke2(builder, fnTy, fnVal, arr, call.args.length.toUInt, contBB, excpad, toCString(""))
 +          foreachIndexed(call.args) { (a, i) => arr(i) = valueOf(a, locals) }
 +          C.LLVMBuildInvoke2(builder, fnTy, fnVal, arr, call.args.length.toUInt, contBB, excpad, emptyName)
-+        }
-+        if (call.ty.ret != nir.Type.Unit && call.ty.ret != nir.Type.Nothing)
+         }
+         if (call.ty.ret != nir.Type.Unit && call.ty.ret != nir.Type.Nothing)
+-          locals(id) = invokeVal
 +          locals(id.id) = invokeVal
-+
-+        // Resume emitting this NIR block's remaining instructions into the
-+        // invoke's normal-continuation sub-block.
-+        current = contBB
-+        C.LLVMPositionBuilderAtEnd(builder, current)
-+
-+      case nir.Inst.Let(id, op, unwind) =>
-+        val v = genOp(op, builder, locals)
+ 
+         // Resume emitting this NIR block's remaining instructions into the
+         // invoke's normal-continuation sub-block.
+@@ -853,7 +904,7 @@ private[direct] final class DirectCodeGen(
+ 
+       case nir.Inst.Let(id, op, unwind) =>
+         val v = genOp(op, builder, locals)
+-        if (op.resty != nir.Type.Unit && op.resty != nir.Type.Nothing) locals(id) = v
 +        if (op.resty != nir.Type.Unit && op.resty != nir.Type.Nothing) locals(id.id) = v
-+        unwind match {
-+          case u: nir.Next.Unwind =>
-+            // A stale/dead unwind edge left over from an op that Interflow
-+            // simplified down from an invoke-worthy call (see Capability's
-+            // comment) -- this op itself compiles normally (no invoke, no
-+            // block split), but the landingpad it points at still needs to
-+            // exist so any phi wiring an unwind edge into it resolves.
-+            buildLandingPad(fn, builder, locals, blockEntry, landingpadSucc, u, diScope)
-+            C.LLVMPositionBuilderAtEnd(builder, current)
-+          case _ => ()
-+        }
-+      case nir.Inst.Ret(value) =>
-+        if (value == nir.Val.Unit) C.LLVMBuildRetVoid(builder)
-+        else C.LLVMBuildRet(builder, valueOf(value, locals))
-+      case nir.Inst.Jump(next) =>
+         unwind match {
+           case u: nir.Next.Unwind =>
+             // A stale/dead unwind edge left over from an op that Interflow
+@@ -869,13 +920,13 @@ private[direct] final class DirectCodeGen(
+         if (value == nir.Val.Unit) C.LLVMBuildRetVoid(builder)
+         else C.LLVMBuildRet(builder, valueOf(value, locals))
+       case nir.Inst.Jump(next) =>
+-        C.LLVMBuildBr(builder, blockEntry(next.id))
 +        C.LLVMBuildBr(builder, blockEntry(next.id.id))
-+      case nir.Inst.If(cond, thenp, elsep) =>
+       case nir.Inst.If(cond, thenp, elsep) =>
+-        C.LLVMBuildCondBr(builder, valueOf(cond, locals), blockEntry(thenp.id), blockEntry(elsep.id))
 +        C.LLVMBuildCondBr(builder, valueOf(cond, locals), blockEntry(thenp.id.id), blockEntry(elsep.id.id))
-+      case nir.Inst.Switch(scrut, default, cases) =>
+       case nir.Inst.Switch(scrut, default, cases) =>
+-        val sw = C.LLVMBuildSwitch(builder, valueOf(scrut, locals), blockEntry(default.id), cases.length.toUInt)
 +        val sw = C.LLVMBuildSwitch(builder, valueOf(scrut, locals), blockEntry(default.id.id), cases.length.toUInt)
-+        cases.foreach {
+         cases.foreach {
+-          case nir.Next.Case(v, next) => C.LLVMAddCase(sw, valueOf(v, locals), blockEntry(next.id))
 +          case nir.Next.Case(v, next) => C.LLVMAddCase(sw, valueOf(v, locals), blockEntry(next.id.id))
-+          case other                  => unsupported(other)
-+        }
-+      case nir.Inst.Unreachable(_) =>
-+        C.LLVMBuildUnreachable(builder)
-+      case other => unsupported(other)
-+    }
-+    }
-+
+           case other                  => unsupported(other)
+         }
+       case nir.Inst.Unreachable(_) =>
+@@ -884,7 +935,7 @@ private[direct] final class DirectCodeGen(
+     }
+     }
+ 
+-    blockExit(b.id) = current
 +    blockExit(b.id.id) = current
-+  }
-+
-+  /** Builds a catch-all landingpad (matching
-+   *  UnixCompat.genScalaNativeLandingPad exactly -- this backend only
-+   *  supports the default ScalaNative personality, see
-+   *  Capability.wholeBuildGatesOk) and registers its "succ" block into
-+   *  `landingpadSucc` for later phi-predecessor resolution. Leaves the
-+   *  builder positioned inside the landingpad; callers that need to keep
-+   *  emitting elsewhere must reposition it afterward. Returns the landingpad
-+   *  entry block (the "unwind label" target an invoke needs).
-+   */
-+  private def buildLandingPad(
-+      fn: LLVMValueRef,
-+      builder: LLVMBuilderRef,
+   }
+ 
+   /** Builds a catch-all landingpad (matching
+@@ -899,87 +950,101 @@ private[direct] final class DirectCodeGen(
+   private def buildLandingPad(
+       fn: LLVMValueRef,
+       builder: LLVMBuilderRef,
+-      locals: mutable.Map[nir.Local, LLVMValueRef],
+-      blockEntry: mutable.Map[nir.Local, LLVMBasicBlockRef],
+-      landingpadSucc: mutable.Map[nir.Local, LLVMBasicBlockRef],
 +      locals: mutable.LongMap[LLVMValueRef],
 +      blockEntry: mutable.LongMap[LLVMBasicBlockRef],
 +      landingpadSucc: mutable.LongMap[LLVMBasicBlockRef],
-+      unwind: nir.Next.Unwind,
-+      diScope: LLVMMetadataRef
-+  ): LLVMBasicBlockRef = {
-+    val nir.Next.Unwind(nir.Val.Local(excId, _), next) = unwind: @unchecked
-+    val nir.Next.Label(targetId, _) = next: @unchecked
-+
+       unwind: nir.Next.Unwind,
+       diScope: LLVMMetadataRef
+   ): LLVMBasicBlockRef = {
+     val nir.Next.Unwind(nir.Val.Local(excId, _), next) = unwind: @unchecked
+-    val excpad = appendBB(fn, s"_${excId.id}.landingpad")
+-    val excsucc = appendBB(fn, s"_${excId.id}.landingpad.succ")
+-    landingpadSucc(excId) = excsucc
+     val nir.Next.Label(targetId, _) = next: @unchecked
+ 
+-    if (usingCppExceptions) {
+-      // Mirrors UnixCompat.genCppLandingPad exactly (see its comment for the
+-      // full shape): landingpad catches the scalanative.ExceptionWrapper RTTI
+-      // clause specifically (not catch-all); a typeid mismatch means it isn't
+-      // ours to handle, so it's re-thrown via `resume` instead of consumed.
+-      val excfail = appendBB(fn, s"_${excId.id}.landingpad.fail")
+-
+-      C.LLVMPositionBuilderAtEnd(builder, excpad)
+-      val rec = Zone.acquire(implicit z => C.LLVMBuildLandingPad(builder, excRecTy, null, 1.toUInt, toCString("")))
+-      C.LLVMAddClause(rec, cppExceptionWrapperGlobal)
+-      val r0 = Zone.acquire(implicit z => C.LLVMBuildExtractValue(builder, rec, 0.toUInt, toCString("")))
+-      val r1 = Zone.acquire(implicit z => C.LLVMBuildExtractValue(builder, rec, 1.toUInt, toCString("")))
+-      val typeId = Zone.acquire { implicit z =>
+-        val args = alloc[LLVMValueRef](1)
+-        args(0) = cppExceptionWrapperGlobal
+-        C.LLVMBuildCall2(builder, ehTypeidForFnTy, ehTypeidForFn, args, 1.toUInt, toCString(""))
+-      }
+-      val cmp = Zone.acquire(implicit z => C.LLVMBuildICmp(builder, LLVMIntEQ, r1, typeId, toCString("")))
+-      C.LLVMBuildCondBr(builder, cmp, excsucc, excfail)
+-
+-      C.LLVMPositionBuilderAtEnd(builder, excsucc)
+-      val w0 = Zone.acquire { implicit z =>
+-        val args = alloc[LLVMValueRef](1)
+-        args(0) = r0
+-        C.LLVMBuildCall2(builder, cxaBeginCatchFnTy, cxaBeginCatchFn, args, 1.toUInt, toCString(""))
+-      }
+-      // `w0` points at the ExceptionWrapper's vtable/typeinfo slot; the
+-      // wrapped Scala exception object pointer is the SECOND word
+-      // (`getelementptr ptr, ptr w0, i32 1`), matching UnixCompat's
+-      // opaque-pointer branch exactly.
+-      val w2 = Zone.acquire { implicit z =>
+-        val idx = alloc[LLVMValueRef](1)
+-        idx(0) = C.LLVMConstInt(llvmType(nir.Type.Int), 1L.toULong, 1)
+-        C.LLVMBuildGEP2(builder, ptrTy, w0, idx, 1.toUInt, toCString(""))
+-      }
+-      val excVal = Zone.acquire(implicit z => C.LLVMBuildLoad2(builder, ptrTy, w2, toCString("")))
+-      Zone.acquire { implicit z => C.LLVMBuildCall2(builder, cxaEndCatchFnTy, cxaEndCatchFn, alloc[LLVMValueRef](0), 0.toUInt, toCString("")) }
+-      locals(excId) = excVal
+-      C.LLVMBuildBr(builder, blockEntry(targetId))
+-
+-      C.LLVMPositionBuilderAtEnd(builder, excfail)
+-      C.LLVMBuildResume(builder, rec)
+-    } else {
+-      C.LLVMPositionBuilderAtEnd(builder, excpad)
+-      val rec = Zone.acquire(implicit z => C.LLVMBuildLandingPad(builder, excRecTy, null, 1.toUInt, toCString("")))
+-      C.LLVMAddClause(rec, C.LLVMConstNull(ptrTy))
+-      val r0 = Zone.acquire(implicit z => C.LLVMBuildExtractValue(builder, rec, 0.toUInt, toCString("")))
+-      C.LLVMBuildBr(builder, excsucc)
+-
+-      C.LLVMPositionBuilderAtEnd(builder, excsucc)
+-      val excVal = Zone.acquire { implicit z =>
+-        val args = alloc[LLVMValueRef](1)
+-        args(0) = r0
+-        C.LLVMBuildCall2(builder, scalanativeCatchFnTy, scalanativeCatchFn, args, 1.toUInt, toCString(""))
 +    // One Zone for the whole call: this used to open (and immediately
 +    // close) a fresh MemoryPoolZone per small allocation below -- up to 7
 +    // per landingpad (appendBB x2/x3 plus each 1-element args array) --
@@ -1034,99 +499,120 @@ index 0000000..99d31d0
 +        }
 +        locals(excId.id) = excVal
 +        C.LLVMBuildBr(builder, blockEntry(targetId.id))
-+      }
-+
+       }
+-      locals(excId) = excVal
+-      C.LLVMBuildBr(builder, blockEntry(targetId))
+-    }
+ 
+-    excpad
 +      excpad
 +    }
-+  }
-+
-+  private def genOp(
-+      op: nir.Op,
-+      builder: LLVMBuilderRef,
+   }
+ 
+   private def genOp(
+       op: nir.Op,
+       builder: LLVMBuilderRef,
+-      locals: mutable.Map[nir.Local, LLVMValueRef]
 +      locals: mutable.LongMap[LLVMValueRef]
-+  ): LLVMValueRef = {
-+    def v(x: nir.Val): LLVMValueRef = valueOf(x, locals)
+   ): LLVMValueRef = {
+     def v(x: nir.Val): LLVMValueRef = valueOf(x, locals)
+-    def n(implicit z: Zone): CString = toCString("")
 +    // A static, permanently-alive empty CString (see `emptyName`'s comment)
 +    // instead of a fresh Zone.acquire + toCString per call -- genOp runs
 +    // once per NIR instruction, so this used to be the dominant per-
 +    // partition allocation cost in this backend.
 +    val n: CString = emptyName
-+    op match {
-+      case nir.Op.Copy(value) => v(value)
-+
-+      // Mirrors AbstractCodeGen's `Lower.GCYield if useGCYieldPointTraps`
-+      // special case exactly (see its long comment there for why BOTH loads
-+      // must be volatile): matched by value equality against the exact
-+      // `Lower.GCYield` global pointer, regardless of `ty` -- this is an
-+      // intrinsic marker Lower.genGCYieldpoint injects, never a real callee.
-+      case nir.Op.Call(_, Lower.GCYield, _) if platform.useGCYieldPointTraps =>
-+        val trapCellPtr = globalValueFor(Lower.GCYieldPointTrapName)
+     op match {
+       case nir.Op.Copy(value) => v(value)
+ 
+@@ -990,9 +1055,9 @@ private[direct] final class DirectCodeGen(
+       // intrinsic marker Lower.genGCYieldpoint injects, never a real callee.
+       case nir.Op.Call(_, Lower.GCYield, _) if platform.useGCYieldPointTraps =>
+         val trapCellPtr = globalValueFor(Lower.GCYieldPointTrapName)
+-        val trap = Zone.acquire(implicit z => C.LLVMBuildLoad2(builder, ptrTy, trapCellPtr, n))
 +        val trap = C.LLVMBuildLoad2(builder, ptrTy, trapCellPtr, n)
-+        C.LLVMSetVolatile(trap, 1)
+         C.LLVMSetVolatile(trap, 1)
+-        val res = Zone.acquire(implicit z => C.LLVMBuildLoad2(builder, ptrTy, trap, n))
 +        val res = C.LLVMBuildLoad2(builder, ptrTy, trap, n)
-+        C.LLVMSetVolatile(res, 1)
-+        res
-+
-+      case nir.Op.Call(ty: nir.Type.Function, ptr, args) =>
-+        val fnTy = functionType(ty)
-+        val fnVal = v(ptr)
-+        Zone.acquire { implicit z =>
-+          val arr = alloc[LLVMValueRef](args.length.max(1))
+         C.LLVMSetVolatile(res, 1)
+         res
+ 
+@@ -1001,12 +1066,12 @@ private[direct] final class DirectCodeGen(
+         val fnVal = v(ptr)
+         Zone.acquire { implicit z =>
+           val arr = alloc[LLVMValueRef](args.length.max(1))
+-          args.zipWithIndex.foreach { case (a, i) => arr(i) = v(a) }
 +          foreachIndexed(args) { (a, i) => arr(i) = v(a) }
-+          C.LLVMBuildCall2(builder, fnTy, fnVal, arr, args.length.toUInt, n)
-+        }
-+
-+      case nir.Op.Load(ty, ptr, memoryOrder) =>
+           C.LLVMBuildCall2(builder, fnTy, fnVal, arr, args.length.toUInt, n)
+         }
+ 
+       case nir.Op.Load(ty, ptr, memoryOrder) =>
+-        val res = Zone.acquire(implicit z => C.LLVMBuildLoad2(builder, llvmType(ty), v(ptr), n))
 +        val res = C.LLVMBuildLoad2(builder, llvmType(ty), v(ptr), n)
-+        memoryOrder.foreach { mo =>
-+          // AbstractCodeGen's `load atomic ... align N` (genOp) requires an
-+          // explicit alignment whenever an ordering is present -- LLVM
-+          // rejects an unaligned atomic memory access.
-+          C.LLVMSetOrdering(res, llvmOrdering(mo))
-+          C.LLVMSetAlignment(res, MemoryLayout.alignmentOf(ty).toInt.toUInt)
-+        }
-+        res
-+
-+      case nir.Op.Store(ty, ptr, value, memoryOrder) =>
-+        val res = C.LLVMBuildStore(builder, v(value), v(ptr))
-+        memoryOrder.foreach { mo =>
-+          C.LLVMSetOrdering(res, llvmOrdering(mo))
-+          C.LLVMSetAlignment(res, MemoryLayout.alignmentOf(ty).toInt.toUInt)
-+        }
-+        res
-+
-+      case nir.Op.Fence(memoryOrder) =>
+         memoryOrder.foreach { mo =>
+           // AbstractCodeGen's `load atomic ... align N` (genOp) requires an
+           // explicit alignment whenever an ordering is present -- LLVM
+@@ -1025,12 +1090,12 @@ private[direct] final class DirectCodeGen(
+         res
+ 
+       case nir.Op.Fence(memoryOrder) =>
+-        Zone.acquire(implicit z => C.LLVMBuildFence(builder, llvmOrdering(memoryOrder), 0, n))
 +        C.LLVMBuildFence(builder, llvmOrdering(memoryOrder), 0, n)
-+
-+      case nir.Op.Elem(ty, ptr, indexes) =>
-+        Zone.acquire { implicit z =>
-+          val arr = alloc[LLVMValueRef](indexes.length.max(1))
+ 
+       case nir.Op.Elem(ty, ptr, indexes) =>
+         Zone.acquire { implicit z =>
+           val arr = alloc[LLVMValueRef](indexes.length.max(1))
+-          indexes.zipWithIndex.foreach { case (idx, i) => arr(i) = v(idx) }
 +          foreachIndexed(indexes) { (idx, i) => arr(i) = v(idx) }
-+          C.LLVMBuildGEP2(builder, llvmType(ty), v(ptr), arr, indexes.length.toUInt, n)
-+        }
-+
-+      case nir.Op.Stackalloc(ty, count) =>
-+        // NIR's alloca always carries an explicit element count (`alloca ty,
-+        // count` even for a "scalar" alloca) -- LLVMBuildAlloca has no count
-+        // param, so this needs the array-alloca builder.
+           C.LLVMBuildGEP2(builder, llvmType(ty), v(ptr), arr, indexes.length.toUInt, n)
+         }
+ 
+@@ -1038,113 +1103,107 @@ private[direct] final class DirectCodeGen(
+         // NIR's alloca always carries an explicit element count (`alloca ty,
+         // count` even for a "scalar" alloca) -- LLVMBuildAlloca has no count
+         // param, so this needs the array-alloca builder.
+-        Zone.acquire(implicit z => C.LLVMBuildArrayAlloca(builder, llvmType(ty), v(count), n))
 +        C.LLVMBuildArrayAlloca(builder, llvmType(ty), v(count), n)
-+
-+      case nir.Op.Extract(aggr, indexes) =>
-+        indexes match {
-+          case Seq(idx) =>
+ 
+       case nir.Op.Extract(aggr, indexes) =>
+         indexes match {
+           case Seq(idx) =>
+-            Zone.acquire(implicit z => C.LLVMBuildExtractValue(builder, v(aggr), idx.toUInt, n))
 +            C.LLVMBuildExtractValue(builder, v(aggr), idx.toUInt, n)
-+          case _ => unsupported(op) // nested extract paths not needed post-Lower today
-+        }
-+
-+      case nir.Op.Insert(aggr, value, indexes) =>
-+        indexes match {
-+          case Seq(idx) =>
+           case _ => unsupported(op) // nested extract paths not needed post-Lower today
+         }
+ 
+       case nir.Op.Insert(aggr, value, indexes) =>
+         indexes match {
+           case Seq(idx) =>
+-            Zone.acquire(implicit z => C.LLVMBuildInsertValue(builder, v(aggr), v(value), idx.toUInt, n))
 +            C.LLVMBuildInsertValue(builder, v(aggr), v(value), idx.toUInt, n)
-+          case _ => unsupported(op)
-+        }
-+
-+      case nir.Op.Bin(bin, ty, l, r) =>
-+        val (lv, rv) = (valueOfAt(l, ty, locals), valueOfAt(r, ty, locals))
+           case _ => unsupported(op)
+         }
+ 
+       case nir.Op.Bin(bin, ty, l, r) =>
+         val (lv, rv) = (valueOfAt(l, ty, locals), valueOfAt(r, ty, locals))
+-        Zone.acquire { implicit z =>
+-          bin match {
+-            case nir.Bin.Iadd => C.LLVMBuildAdd(builder, lv, rv, n)
+-            case nir.Bin.Fadd => C.LLVMBuildFAdd(builder, lv, rv, n)
+-            case nir.Bin.Isub => C.LLVMBuildSub(builder, lv, rv, n)
+-            case nir.Bin.Fsub => C.LLVMBuildFSub(builder, lv, rv, n)
+-            case nir.Bin.Imul => C.LLVMBuildMul(builder, lv, rv, n)
+-            case nir.Bin.Fmul => C.LLVMBuildFMul(builder, lv, rv, n)
+-            case nir.Bin.Sdiv => C.LLVMBuildSDiv(builder, lv, rv, n)
+-            case nir.Bin.Udiv => C.LLVMBuildUDiv(builder, lv, rv, n)
+-            case nir.Bin.Fdiv => C.LLVMBuildFDiv(builder, lv, rv, n)
+-            case nir.Bin.Srem => C.LLVMBuildSRem(builder, lv, rv, n)
+-            case nir.Bin.Urem => C.LLVMBuildURem(builder, lv, rv, n)
+-            case nir.Bin.Frem => C.LLVMBuildFRem(builder, lv, rv, n)
+-            case nir.Bin.Shl  => C.LLVMBuildShl(builder, lv, rv, n)
+-            case nir.Bin.Lshr => C.LLVMBuildLShr(builder, lv, rv, n)
+-            case nir.Bin.Ashr => C.LLVMBuildAShr(builder, lv, rv, n)
+-            case nir.Bin.And  => C.LLVMBuildAnd(builder, lv, rv, n)
+-            case nir.Bin.Or   => C.LLVMBuildOr(builder, lv, rv, n)
+-            case nir.Bin.Xor  => C.LLVMBuildXor(builder, lv, rv, n)
+-          }
 +        bin match {
 +          case nir.Bin.Iadd => C.LLVMBuildAdd(builder, lv, rv, n)
 +          case nir.Bin.Fadd => C.LLVMBuildFAdd(builder, lv, rv, n)
@@ -1146,11 +632,38 @@ index 0000000..99d31d0
 +          case nir.Bin.And  => C.LLVMBuildAnd(builder, lv, rv, n)
 +          case nir.Bin.Or   => C.LLVMBuildOr(builder, lv, rv, n)
 +          case nir.Bin.Xor  => C.LLVMBuildXor(builder, lv, rv, n)
-+        }
-+
-+      case nir.Op.Comp(comp, ty, l, r) =>
-+        val (lv, rv) = (valueOfAt(l, ty, locals), valueOfAt(r, ty, locals))
-+        val isFloat = ty == nir.Type.Float || ty == nir.Type.Double
+         }
+ 
+       case nir.Op.Comp(comp, ty, l, r) =>
+         val (lv, rv) = (valueOfAt(l, ty, locals), valueOfAt(r, ty, locals))
+         val isFloat = ty == nir.Type.Float || ty == nir.Type.Double
+-        Zone.acquire { implicit z =>
+-          if (isFloat) {
+-            val pred = comp match {
+-              case nir.Comp.Feq => LLVMRealOEQ
+-              case nir.Comp.Fne => LLVMRealUNE
+-              case nir.Comp.Flt => LLVMRealOLT
+-              case nir.Comp.Fle => LLVMRealOLE
+-              case nir.Comp.Fgt => LLVMRealOGT
+-              case nir.Comp.Fge => LLVMRealOGE
+-              case other        => unsupported(other)
+-            }
+-            C.LLVMBuildFCmp(builder, pred, lv, rv, n)
+-          } else {
+-            val pred = comp match {
+-              case nir.Comp.Ieq => LLVMIntEQ
+-              case nir.Comp.Ine => LLVMIntNE
+-              case nir.Comp.Ult => LLVMIntULT
+-              case nir.Comp.Ule => LLVMIntULE
+-              case nir.Comp.Ugt => LLVMIntUGT
+-              case nir.Comp.Uge => LLVMIntUGE
+-              case nir.Comp.Slt => LLVMIntSLT
+-              case nir.Comp.Sle => LLVMIntSLE
+-              case nir.Comp.Sgt => LLVMIntSGT
+-              case nir.Comp.Sge => LLVMIntSGE
+-              case other        => unsupported(other)
+-            }
+-            C.LLVMBuildICmp(builder, pred, lv, rv, n)
 +        if (isFloat) {
 +          val pred = comp match {
 +            case nir.Comp.Feq => LLVMRealOEQ
@@ -1175,13 +688,43 @@ index 0000000..99d31d0
 +            case nir.Comp.Sgt => LLVMIntSGT
 +            case nir.Comp.Sge => LLVMIntSGE
 +            case other        => unsupported(other)
-+          }
+           }
 +          C.LLVMBuildICmp(builder, pred, lv, rv, n)
-+        }
-+
-+      case nir.Op.Conv(conv, ty, value) =>
-+        val src = v(value)
-+        val destTy = llvmType(ty)
+         }
+ 
+       case nir.Op.Conv(conv, ty, value) =>
+         val src = v(value)
+         val destTy = llvmType(ty)
+-        Zone.acquire { implicit z =>
+-          conv match {
+-            case nir.Conv.Trunc    => C.LLVMBuildTrunc(builder, src, destTy, n)
+-            case nir.Conv.Zext     => C.LLVMBuildZExt(builder, src, destTy, n)
+-            case nir.Conv.Sext     => C.LLVMBuildSExt(builder, src, destTy, n)
+-            case nir.Conv.Fptrunc  => C.LLVMBuildFPTrunc(builder, src, destTy, n)
+-            case nir.Conv.Fpext    => C.LLVMBuildFPExt(builder, src, destTy, n)
+-            case nir.Conv.Fptoui   => C.LLVMBuildFPToUI(builder, src, destTy, n)
+-            case nir.Conv.Fptosi   => C.LLVMBuildFPToSI(builder, src, destTy, n)
+-            case nir.Conv.Uitofp   => C.LLVMBuildUIToFP(builder, src, destTy, n)
+-            case nir.Conv.Sitofp   => C.LLVMBuildSIToFP(builder, src, destTy, n)
+-            case nir.Conv.Ptrtoint => C.LLVMBuildPtrToInt(builder, src, destTy, n)
+-            case nir.Conv.Inttoptr => C.LLVMBuildIntToPtr(builder, src, destTy, n)
+-            case nir.Conv.Bitcast  => C.LLVMBuildBitCast(builder, src, destTy, n)
+-            case conv @ (nir.Conv.ZSizeCast | nir.Conv.SSizeCast) =>
+-              val fromSize = value.ty match {
+-                case nir.Type.Size          => platform.sizeOfPtrBits
+-                case i: nir.Type.FixedSizeI => i.width
+-                case o                      => unsupported(o)
+-              }
+-              val toSize = ty match {
+-                case nir.Type.Size          => platform.sizeOfPtrBits
+-                case i: nir.Type.FixedSizeI => i.width
+-                case o                      => unsupported(o)
+-              }
+-              if (fromSize == toSize) C.LLVMBuildBitCast(builder, src, destTy, n)
+-              else if (fromSize > toSize) C.LLVMBuildTrunc(builder, src, destTy, n)
+-              else if (conv == nir.Conv.ZSizeCast) C.LLVMBuildZExt(builder, src, destTy, n)
+-              else C.LLVMBuildSExt(builder, src, destTy, n)
+-          }
 +        conv match {
 +          case nir.Conv.Trunc    => C.LLVMBuildTrunc(builder, src, destTy, n)
 +          case nir.Conv.Zext     => C.LLVMBuildZExt(builder, src, destTy, n)
@@ -1210,66 +753,6 @@ index 0000000..99d31d0
 +            else if (fromSize > toSize) C.LLVMBuildTrunc(builder, src, destTy, n)
 +            else if (conv == nir.Conv.ZSizeCast) C.LLVMBuildZExt(builder, src, destTy, n)
 +            else C.LLVMBuildSExt(builder, src, destTy, n)
-+        }
-+
-+      case other => unsupported(other)
-+    }
-+  }
-+
-+  // ---- object file emission --------------------------------------------
-+
-+  private def emitObjectFile(objPath: Path): Unit = {
-+    T.LLVMInitializeX86TargetInfo()
-+    T.LLVMInitializeX86Target()
-+    T.LLVMInitializeX86TargetMC()
-+    T.LLVMInitializeX86AsmPrinter()
-+    T.LLVMInitializeX86AsmParser()
-+    T.LLVMInitializeAArch64TargetInfo()
-+    T.LLVMInitializeAArch64Target()
-+    T.LLVMInitializeAArch64TargetMC()
-+    T.LLVMInitializeAArch64AsmPrinter()
-+    T.LLVMInitializeAArch64AsmParser()
-+
-+    val triple = config.compilerConfig.targetTriple
-+      .getOrElse(build.Discover.targetTriple(config.compilerConfig))
-+
-+    Zone.acquire { implicit z =>
-+      val tripleC = toCString(triple)
-+      C.LLVMSetTarget(module, tripleC)
-+
-+      val targetOut = alloc[LLVMTargetRef](1)
-+      val errMsg = alloc[CString](1)
-+      if (TM.LLVMGetTargetFromTriple(tripleC, targetOut, errMsg) != 0) {
-+        val msg = if (errMsg(0) == null) triple else fromCString(errMsg(0))
-+        unsupported(s"LLVMGetTargetFromTriple failed for '$triple': $msg")
-+      }
-+
-+      val optLevel =
-+        if (config.mode == build.Mode.Debug) LLVMCodeGenLevelNone
-+        else LLVMCodeGenLevelDefault
-+
-+      val tm = TM.LLVMCreateTargetMachine(
-+        targetOut(0),
-+        tripleC,
-+        toCString(""),
-+        toCString(""),
-+        optLevel,
-+        LLVMRelocPIC,
-+        LLVMCodeModelDefault
-+      )
-+      try {
-+        val dataLayout = TM.LLVMCreateTargetDataLayout(tm)
-+        val dataLayoutStr = TM.LLVMCopyStringRepOfTargetData(dataLayout)
-+        C.LLVMSetDataLayout(module, dataLayoutStr)
-+        C.LLVMDisposeMessage(dataLayoutStr)
-+
-+        val emitErrMsg = alloc[CString](1)
-+        val filename = toCString(objPath.toAbsolutePath.toString)
-+        if (TM.LLVMTargetMachineEmitToFile(tm, module, filename, LLVMObjectFile, emitErrMsg) != 0) {
-+          val msg = if (emitErrMsg(0) == null) "<no message>" else fromCString(emitErrMsg(0))
-+          unsupported(s"LLVMTargetMachineEmitToFile failed: $msg")
-+        }
-+      } finally TM.LLVMDisposeTargetMachine(tm)
-+    }
-+  }
-+}
+         }
+ 
+       case other => unsupported(other)
