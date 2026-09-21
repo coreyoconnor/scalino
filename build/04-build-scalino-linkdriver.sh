@@ -42,6 +42,27 @@ else
   echo "  WARNING: locally-built javalib jar not found ($LOCAL_JAVALIB_JAR) -- run build/01b-build-patched-javalib.sh first, or patches/scala-native-0009 (ZipFileSystemProvider) will NOT take effect and scalino-linkdriver will fall back to needing jar-extraction workarounds. See docs/findings.md."
 fi
 
+# Same substitution for nativelib_native0.5_3 -- this bootstrap classpath
+# (tools-patched.cp, via tools-native.cp/01-fetch-deps.sh) is a completely
+# separate lineage from $WORK/nativelibs.cp (the one build/01c-build-patched-
+# nativelib.sh substitutes in place), so 01c's own patched jar never reached
+# scalino-linkdriver's own build until this swap was added. Harmless before
+# nativelib gained new symbols an end user's javalib/nativelib could fail to
+# resolve at NIR-link time (e.g. runtime.SmiBox$, added for SMI-style
+# tagged-pointer boxing and referenced directly from javalib's boxed-primitive
+# classes) -- scalino-linkdriver's own bootstrap build links a full program
+# against javalib+nativelib together, so both need to agree on the same
+# patched pair, not just javalib.
+LOCAL_NATIVELIB_JAR="$HOME/.ivy2/local/org.scala-native/nativelib_native0.5_3/${SCALA_NATIVE_VERSION}-SNAPSHOT/jars/nativelib_native0.5_3.jar"
+if [[ -f "$LOCAL_NATIVELIB_JAR" ]]; then
+  TMP_NATIVELIB_SWAP="$(mktemp)"
+  { tr "$CP_SEP" '\n' < "$TOOLS_PATCHED_JAVALIB_CP" | grep -v '/nativelib_native0\.5_3-'; echo "$LOCAL_NATIVELIB_JAR"; } | paste -sd"$CP_SEP" - > "$TMP_NATIVELIB_SWAP"
+  mv "$TMP_NATIVELIB_SWAP" "$TOOLS_PATCHED_JAVALIB_CP"
+  echo "  using locally-built, patched nativelib jar: $LOCAL_NATIVELIB_JAR"
+else
+  echo "  WARNING: locally-built nativelib jar not found ($LOCAL_NATIVELIB_JAR) -- run build/01c-build-patched-nativelib.sh first, or nativelib source patches will NOT take effect in scalino-linkdriver's own bootstrap build."
+fi
+
 NATIVE_DRIVER_CP="$(to_native_path "$WORK/driver-classes")$CP_SEP$(cat "$TOOLS_PATCHED_JAVALIB_CP")"
 
 NSCPLUGIN_JAR="$(cat "$WORK/nscplugin.jar.txt")"

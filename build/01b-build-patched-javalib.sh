@@ -81,8 +81,22 @@ LOCAL_JAVALIB_JAR="$HOME/.ivy2/local/org.scala-native/javalib_native0.5_3/${SCAL
 # javalib patch is real but completely inert for every end user, exactly
 # the "scala-native-0003" gap docs/findings.md describes -- see that file
 # for why this was previously left unwired.
+#
+# -F/-x too, not just the "-<version>" pattern: this local jar's filename
+# has no "-<version>" suffix (it's just javalib_native0.5_3.jar, unlike the
+# coursier-cached javalib_native0.5_3-0.5.12.jar it replaces), so the
+# pattern alone never matches an entry THIS script itself already added on
+# a previous run -- re-running it (e.g. across sessions, against a
+# $WORK/nativelibs.cp that already has the local jar in place from before)
+# appends a duplicate instead of replacing it. Contrary to this comment's
+# own prior claim, that is NOT harmless: 06-package.sh vendors this same
+# file as dist/nativelibs.cp, which real `scalino build` uses for actual
+# native linking, and scala-native's linker unpacks each classpath entry
+# into its own numbered dependencies/ dir -- a repeated entry means the
+# same javalib .o files (time_nano.c, z.c, etc.) get linked twice and
+# clang fails with "duplicate symbol" for every one of them.
 TMP="$(mktemp)"
-{ tr "$CP_SEP" '\n' < "$WORK/nativelibs.cp" | grep -v '/javalib_native0\.5_3-'; echo "$LOCAL_JAVALIB_JAR"; } | paste -sd"$CP_SEP" - > "$TMP"
+{ tr "$CP_SEP" '\n' < "$WORK/nativelibs.cp" | grep -v '/javalib_native0\.5_3-' | grep -Fxv "$LOCAL_JAVALIB_JAR"; echo "$LOCAL_JAVALIB_JAR"; } | paste -sd"$CP_SEP" - > "$TMP"
 mv "$TMP" "$WORK/nativelibs.cp"
 
 echo "OK: patched javalib published to ~/.ivy2/local/org.scala-native/javalib_native0.5_3/${SCALA_NATIVE_VERSION}-SNAPSHOT/"

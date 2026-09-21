@@ -131,14 +131,46 @@ sed "s#$ORIG_JAR#$PATCHED_JAR#" "$WORK/nir-native-patched.cp" > "$WORK/tools-pat
 
 echo "OK: $PATCHED_JAR"
 
+# ---- JVM-targeted nir patch (nir_3 only -- the plain-JVM counterpart to
+# the nir_native0.5_3 patch above). Previously this patch only cached
+# hashCode (a pure implementation detail, no public API change), so the
+# JVM-targeted tools_3 patch below could get away with never patching its
+# own nir_3 jar -- SHARED_SOURCES compiled fine against the stock published
+# nir_3 either way. That stopped being true the moment nir/Types.scala
+# gained a real new public member (Type.Smi, for SMI-style tagged-pointer
+# boxing): SHARED_SOURCES (Lower.scala) now references it, so without this
+# section the tools_3 compile below fails with "value Smi is not a member
+# of object scala.scalanative.nir.Type" even though the native-targeted
+# compile above (which already substitutes nir-native-patched.cp) works
+# fine. Mirrors the native-targeted nir patch immediately above it. ----
+ORIG_NIR_JAR_JVM="$(tr "$CP_SEP" '\n' < "$WORK/tools.cp" | grep "nir_3-$SCALA_NATIVE_VERSION.jar$")"
+[[ -n "$ORIG_NIR_JAR_JVM" ]] || { echo "could not find nir_3-$SCALA_NATIVE_VERSION.jar on tools.cp" >&2; exit 1; }
+
+PATCHED_NIR_DIR_JVM="$WORK/patched-nir-jvm-classes"
+PATCHED_NIR_JAR_JVM="$DIST/nir-jvm-patched.jar"
+
+rm -rf "$PATCHED_NIR_DIR_JVM"
+mkdir -p "$PATCHED_NIR_DIR_JVM"
+"$JAVA" -cp "$(cat "$WORK/compiler.cp")" dotty.tools.dotc.Main \
+  -classpath "$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools.cp")" \
+  -d "$PATCHED_NIR_DIR_JVM" \
+  "${NIR_SOURCES[@]}"
+
+cp "$ORIG_NIR_JAR_JVM" "$PATCHED_NIR_JAR_JVM"
+(cd "$PATCHED_NIR_DIR_JVM" && "$JAR" uf "$PATCHED_NIR_JAR_JVM" $(find scala -type f))
+
+sed "s#$ORIG_NIR_JAR_JVM#$PATCHED_NIR_JAR_JVM#" "$WORK/tools.cp" > "$WORK/nir-jvm-patched.cp"
+
+echo "OK: $PATCHED_NIR_JAR_JVM"
+
 # ---- JVM-targeted patch (tools_3): the no-op DirectCodeGenDispatch stub
 # only, since @extern/LLVMCApi/DirectCodeGen can't compile for the JVM. ----
-ORIG_JAR_JVM="$(tr "$CP_SEP" '\n' < "$WORK/tools.cp" | grep "tools_3-$SCALA_NATIVE_VERSION.jar$")"
-[[ -n "$ORIG_JAR_JVM" ]] || { echo "could not find tools_3-$SCALA_NATIVE_VERSION.jar on tools.cp" >&2; exit 1; }
+ORIG_JAR_JVM="$(tr "$CP_SEP" '\n' < "$WORK/nir-jvm-patched.cp" | grep "tools_3-$SCALA_NATIVE_VERSION.jar$")"
+[[ -n "$ORIG_JAR_JVM" ]] || { echo "could not find tools_3-$SCALA_NATIVE_VERSION.jar on nir-jvm-patched.cp" >&2; exit 1; }
 
 PATCHED_DIR_JVM="$WORK/patched-tools-jvm-classes"
 PATCHED_JAR_JVM="$DIST/tools-patched-jvm.jar"
-FULL_CP_JVM="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools.cp")"
+FULL_CP_JVM="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/nir-jvm-patched.cp")"
 
 rm -rf "$PATCHED_DIR_JVM"
 mkdir -p "$PATCHED_DIR_JVM"
@@ -157,6 +189,6 @@ mkdir -p "$PATCHED_DIR_JVM"
 cp "$ORIG_JAR_JVM" "$PATCHED_JAR_JVM"
 (cd "$PATCHED_DIR_JVM" && "$JAR" uf "$PATCHED_JAR_JVM" $(find scala -type f))
 
-sed "s#$ORIG_JAR_JVM#$PATCHED_JAR_JVM#" "$WORK/tools.cp" > "$WORK/tools-patched-jvm.cp"
+sed "s#$ORIG_JAR_JVM#$PATCHED_JAR_JVM#" "$WORK/nir-jvm-patched.cp" > "$WORK/tools-patched-jvm.cp"
 
 echo "OK: $PATCHED_JAR_JVM"

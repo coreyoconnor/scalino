@@ -57,8 +57,22 @@ LOCAL_NATIVELIB_JAR="$HOME/.ivy2/local/org.scala-native/nativelib_native0.5_3/${
 # (06-package.sh's dist/nativelibs.cp vendoring, and every script that copies
 # it as a base before its own javalib swap -- 03/07/08) picks this up
 # automatically, no per-script changes needed.
+#
+# -F/-x too, not just the "-<version>" pattern, and for the same reason
+# 01b-build-patched-javalib.sh's own comment documents for javalib: this
+# local jar's filename has no "-<version>" suffix (it's just
+# nativelib_native0.5_3.jar, unlike the coursier-cached
+# nativelib_native0.5_3-0.5.12.jar it replaces), so the pattern alone never
+# matches an entry THIS jar itself already added on a previous run --
+# without the exact-match filter, re-running this script (e.g. after
+# editing a nativelib source file and rebuilding) appends a duplicate each
+# time instead of replacing it. scala-native's linker does not treat a
+# repeated classpath entry as harmless: it unpacks each one into its own
+# numbered dependencies/ dir, so the same GC/runtime .o files get linked
+# twice (or three times, ...) and clang fails with "duplicate symbol" for
+# every native nativelib symbol.
 TMP="$(mktemp)"
-{ tr "$CP_SEP" '\n' < "$WORK/nativelibs.cp" | grep -v '/nativelib_native0\.5_3-'; echo "$LOCAL_NATIVELIB_JAR"; } | paste -sd"$CP_SEP" - > "$TMP"
+{ tr "$CP_SEP" '\n' < "$WORK/nativelibs.cp" | grep -v '/nativelib_native0\.5_3-' | grep -Fxv "$LOCAL_NATIVELIB_JAR"; echo "$LOCAL_NATIVELIB_JAR"; } | paste -sd"$CP_SEP" - > "$TMP"
 mv "$TMP" "$WORK/nativelibs.cp"
 
 echo "OK: $WORK/nativelibs.cp now points at locally-built, patched nativelib: $LOCAL_NATIVELIB_JAR"
