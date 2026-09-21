@@ -66,4 +66,24 @@ trap restore EXIT
 env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME -u GITHUB_REF -u CI sbt javalib3/publishLocal
 cd - > /dev/null
 
+LOCAL_JAVALIB_JAR="$HOME/.ivy2/local/org.scala-native/javalib_native0.5_3/${SCALA_NATIVE_VERSION}-SNAPSHOT/jars/javalib_native0.5_3.jar"
+[[ -f "$LOCAL_JAVALIB_JAR" ]] || { echo "publishLocal succeeded but $LOCAL_JAVALIB_JAR is missing" >&2; exit 1; }
+
+[[ -f "$WORK/nativelibs.cp" ]] || { echo "missing $WORK/nativelibs.cp -- run 01-fetch-deps.sh first" >&2; exit 1; }
+
+# Substitute in place, same technique 01c uses for nativelib: every real
+# `scalino package`/`scalino build` a user runs links against dist/lib's
+# copy of $WORK/nativelibs.cp (06-package.sh vendors it verbatim), not just
+# this project's own self-hosting bootstrap (03/08's own separately-scoped
+# NATIVELIBS_CP copies, which do their own substitution already and keep
+# working regardless -- worst case they end up with this same local jar
+# listed twice, harmless on a dotc/scalac classpath). Without this, a
+# javalib patch is real but completely inert for every end user, exactly
+# the "scala-native-0003" gap docs/findings.md describes -- see that file
+# for why this was previously left unwired.
+TMP="$(mktemp)"
+{ tr "$CP_SEP" '\n' < "$WORK/nativelibs.cp" | grep -v '/javalib_native0\.5_3-'; echo "$LOCAL_JAVALIB_JAR"; } | paste -sd"$CP_SEP" - > "$TMP"
+mv "$TMP" "$WORK/nativelibs.cp"
+
 echo "OK: patched javalib published to ~/.ivy2/local/org.scala-native/javalib_native0.5_3/${SCALA_NATIVE_VERSION}-SNAPSHOT/"
+echo "OK: $WORK/nativelibs.cp now points at locally-built, patched javalib: $LOCAL_JAVALIB_JAR"

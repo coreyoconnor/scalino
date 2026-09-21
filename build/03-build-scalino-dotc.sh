@@ -47,7 +47,17 @@ LINK_WORK="$SELFHOST_DIR/link-work"
 NATIVELIBS_CP="$SELFHOST_DIR/nativelibs.cp"
 LOCAL_JAVALIB_JAR="$HOME/.ivy2/local/org.scala-native/javalib_native0.5_3/${SCALA_NATIVE_VERSION}-SNAPSHOT/jars/javalib_native0.5_3.jar"
 if [[ -f "$LOCAL_JAVALIB_JAR" ]]; then
-  { tr "$CP_SEP" '\n' < "$WORK/nativelibs.cp" | grep -v '/javalib_native0\.5_3-'; echo "$LOCAL_JAVALIB_JAR"; } | paste -sd"$CP_SEP" - > "$NATIVELIBS_CP"
+  # -F/-x, not the old -v '/javalib_native0\.5_3-' regex: 01b-build-patched-javalib.sh
+  # now rewrites $WORK/nativelibs.cp in place to already point straight at
+  # $LOCAL_JAVALIB_JAR (its filename has no "-<version>" suffix, so that old
+  # pattern no longer matches it there) -- appending it again unconditionally
+  # then listed the same jar twice, and scala-native's linker does NOT treat
+  # that as harmless: it unpacks each classpath entry into its own numbered
+  # dependencies/ dir, so the same .o files come in twice and clang fails
+  # with "duplicate symbol" for every native javalib symbol (z.c, time_nano.c,
+  # etc). Filtering the exact local path too makes this idempotent regardless
+  # of whether $WORK/nativelibs.cp already has it.
+  { tr "$CP_SEP" '\n' < "$WORK/nativelibs.cp" | grep -v '/javalib_native0\.5_3-' | grep -Fxv "$LOCAL_JAVALIB_JAR"; echo "$LOCAL_JAVALIB_JAR"; } | paste -sd"$CP_SEP" - > "$NATIVELIBS_CP"
   echo "  using locally-built, patched javalib jar: $LOCAL_JAVALIB_JAR"
 else
   cp "$WORK/nativelibs.cp" "$NATIVELIBS_CP"

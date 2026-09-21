@@ -69,7 +69,12 @@ LINK_WORK="$SELFHOST_DIR/lsp-link-work"
 NATIVELIBS_CP="$SELFHOST_DIR/lsp-nativelibs.cp"
 LOCAL_JAVALIB_JAR="$HOME/.ivy2/local/org.scala-native/javalib_native0.5_3/${SCALA_NATIVE_VERSION}-SNAPSHOT/jars/javalib_native0.5_3.jar"
 if [[ -f "$LOCAL_JAVALIB_JAR" ]]; then
-  { tr "$CP_SEP" '\n' < "$WORK/nativelibs.cp" | grep -v '/javalib_native0\.5_3-'; echo "$LOCAL_JAVALIB_JAR"; } | paste -sd"$CP_SEP" - > "$NATIVELIBS_CP"
+  # See build/03-build-scalino-dotc.sh's identical substitution for why the
+  # exact-path filter (not just the old "-<version>" suffix pattern) is
+  # needed: 01b-build-patched-javalib.sh may have already rewritten
+  # $WORK/nativelibs.cp to point straight at $LOCAL_JAVALIB_JAR, and listing
+  # it twice makes scala-native's linker fail with duplicate symbols.
+  { tr "$CP_SEP" '\n' < "$WORK/nativelibs.cp" | grep -v '/javalib_native0\.5_3-' | grep -Fxv "$LOCAL_JAVALIB_JAR"; echo "$LOCAL_JAVALIB_JAR"; } | paste -sd"$CP_SEP" - > "$NATIVELIBS_CP"
   echo "  using locally-built, patched javalib jar: $LOCAL_JAVALIB_JAR"
 else
   cp "$WORK/nativelibs.cp" "$NATIVELIBS_CP"
