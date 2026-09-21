@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..99d31d0
 --- /dev/null
 +++ b/tools/native/src/main/scala/scala/scalanative/codegen/llvm/direct/DirectCodeGen.scala
-@@ -0,0 +1,1268 @@
+@@ -0,0 +1,1269 @@
 +package scala.scalanative
 +package codegen
 +package llvm
@@ -292,21 +292,22 @@ index 0000000..99d31d0
 +  // not a fallback trigger.
 +  private val debugInfoEnabled = config.compilerConfig.sourceLevelDebuggingConfig.enabled
 +  private lazy val diBuilder: LLVMDIBuilderRef = DI.LLVMCreateDIBuilder(module)
-+  private val diFileCache = mutable.Map.empty[(String, String), LLVMMetadataRef]
++  private val diFileCache = mutable.Map.empty[nir.SourceFile, LLVMMetadataRef]
 +
 +  private def diFileFor(pos: nir.SourcePosition): LLVMMetadataRef = {
-+    val filename = pos.source.filename.getOrElse("unknown")
-+    val directory = pos.source.directory.getOrElse("")
 +    diFileCache.getOrElseUpdate(
-+      (filename, directory),
-+      Zone.acquire { implicit z =>
-+        DI.LLVMDIBuilderCreateFile(
-+          diBuilder,
-+          toCString(filename),
-+          filename.length.toUSize,
-+          toCString(directory),
-+          directory.length.toUSize
-+        )
++      pos.source, {
++        val filename = pos.source.filename.getOrElse("unknown")
++        val directory = pos.source.directory.getOrElse("")
++        Zone.acquire { implicit z =>
++          DI.LLVMDIBuilderCreateFile(
++            diBuilder,
++            toCString(filename),
++            filename.length.toUSize,
++            toCString(directory),
++            directory.length.toUSize
++          )
++        }
 +      }
 +    )
 +  }
