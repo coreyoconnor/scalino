@@ -50,6 +50,8 @@ SHARED_SOURCES=(
   "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/Combine.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/Eval.scala"
   "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/MergeProcessor.scala"
+  "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/State.scala"
+  "$VENDOR/tools/src/main/scala/scala/scalanative/interflow/UseDef.scala"
 )
 NSCPLUGIN_JAR="$(cat "$WORK/nscplugin.jar.txt")"
 
