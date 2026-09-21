@@ -112,4 +112,11 @@ if ! command -v clang >/dev/null 2>&1; then
   echo "install.sh: warning -- clang not found on PATH. scalino needs clang/clang++ to build anything, even a zero-dependency Hello World."
 fi
 
+# Pre-generated shell completion scripts ship in the tarball at
+# dist/completions/ (see cli/ScalinoCli.scala's `completions` subcommand) --
+# a manual install like this one has no single system-wide completions
+# dir to drop them into, so just point the user at them (brew/apt/dnf/arch/
+# nix installs place these automatically -- see packaging/*).
+echo "install.sh: shell completions are in $dest_dir/completions/ -- e.g. source $dest_dir/completions/scalino.bash from your shell rc, or copy _scalino/scalino.fish to your zsh/fish completions dir"
+
 echo "install.sh: try it: echo '@main def hello(): Unit = println(\"hello\")' > Hello.scala && scalino run Hello.scala"

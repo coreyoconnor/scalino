@@ -61,6 +61,14 @@ file for what's still manual:
 [Nix flake](packaging/nix/flake.nix),
 [Homebrew formula](packaging/homebrew/scalino.rb).
 
+Every one of the above (brew/apt/dnf/arch/nix) installs bash/zsh/fish
+completions for you automatically, at each shell's own standard lookup
+path — nothing to source by hand. `install.sh`/a manual tarball extract has
+no single system-wide place to drop them, so those ship the same
+pre-generated scripts under `dist/completions/` for you to source/copy
+yourself (`scalino completions <bash|zsh|fish>` regenerates them too, e.g.
+if you've built from source).
+
 ## Use
 
 `scalino` is a mini scala-cli, shaped like the real

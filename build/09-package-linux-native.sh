@@ -45,6 +45,17 @@ ln -s "/$prefix/scalino" "$staging/usr/bin/scalino"
 ln -s "/$prefix/scalino-lsp" "$staging/usr/bin/scalino-lsp"
 ln -s "/$prefix/scalino-cs" "$staging/usr/bin/scalino-cs"
 
+# Shell completions (pre-generated into dist/completions/ by
+# build/07-build-scalino.sh) -- installed at each shell's own standard
+# system-wide lookup path, so apt/dnf users get them for free with no
+# per-user setup, same as any other native package.
+mkdir -p "$staging/usr/share/bash-completion/completions" \
+         "$staging/usr/share/zsh/site-functions" \
+         "$staging/usr/share/fish/vendor_completions.d"
+cp "dist/completions/scalino.bash" "$staging/usr/share/bash-completion/completions/scalino"
+cp "dist/completions/_scalino" "$staging/usr/share/zsh/site-functions/_scalino"
+cp "dist/completions/scalino.fish" "$staging/usr/share/fish/vendor_completions.d/scalino.fish"
+
 mkdir -p assets
 
 fpm -s dir -C "$staging" \

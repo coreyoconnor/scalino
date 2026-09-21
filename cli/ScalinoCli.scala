@@ -1723,6 +1723,7 @@ object ScalinoCli:
          |  scalino package <sources...> [options] -o <out>   compile and link a native binary
          |  scalino test <sources...> [options] [-- <framework args>]   compile and run tests
          |  scalino setup-ide <sources...> [options]   write .scalino-build/scalino-lsp.json for editor LSP support
+         |  scalino completions <bash|zsh|fish>    print a shell completion script to stdout
          |  scalino clean                          delete the .scalino-build directory
          |  scalino version                        print version info
          |  scalino --help                         this message
@@ -1832,6 +1833,15 @@ object ScalinoCli:
          |startup. Same command name as scala-cli's `setup-ide`, but a
          |different output file: this toolchain's LSP speaks that format
          |directly, no BSP layer needed.
+         |
+         |`completions` prints a shell completion script to stdout, cargo/
+         |scala-cli-style. A brew/apt/dnf/arch/nix install already places
+         |these for you (pre-generated at build time -- see
+         |build/07-build-scalino.sh); this is mainly for install.sh/manual
+         |installs, e.g.:
+         |  bash:  scalino completions bash > /etc/bash_completion.d/scalino
+         |  zsh:   scalino completions zsh > "$${fpath[1]}/_scalino"
+         |  fish:  scalino completions fish > ~/.config/fish/completions/scalino.fish
          |""".stripMargin
     )
 
@@ -2169,6 +2179,128 @@ object ScalinoCli:
     // per-project editor preference, not something this command should
     // guess at or overwrite.
 
+  // ---------------------------------------------------------------------
+  // `scalino completions <bash|zsh|fish>` -- static, hand-written scripts
+  // (no completion-generation library on this toolchain, and the command
+  // surface is small/stable enough not to need one) covering subcommand
+  // names, every long/short option `parseRunOpts`/`main` actually accept,
+  // and the handful of options with a closed value set (`--color`,
+  // `--native-mode`, `--native-gc`, `--native-lto`, `--native-target`).
+  // Same convention as cargo/rustup/scala-cli's own `completions` command:
+  // prints the script to stdout, for the user to source or install
+  // themselves (e.g. `scalino completions bash > /etc/bash_completion.d/scalino`).
+  // ---------------------------------------------------------------------
+
+  private val completionSubcommands = "run compile package test setup-ide clean version completions"
+  private val completionOptions =
+    "--main-class --dep --dependency --compile-dep --compile-only-dependency " +
+    "-r --repo --repository -S --scala --scala-version -O --scalac-option --scalac-opt " +
+    "-w --watch --watching --watching-path --args-file -o --output -v --verbose -q --quiet " +
+    "--color --test-framework --no-incremental --native-mode --native-gc --native-lto " +
+    "--native-clang --native-clangpp --native-linking --native-compile --native-c-compile " +
+    "--native-cpp-compile --native-target --embed-resources --native-multithreading " +
+    "--native-direct-codegen -h --help"
+
+  private def bashCompletion: String =
+    s"""_scalino() {
+       |  local cur prev
+       |  cur="$${COMP_WORDS[COMP_CWORD]}"
+       |  prev="$${COMP_WORDS[COMP_CWORD-1]}"
+       |  local subcommands="$completionSubcommands"
+       |  local options="$completionOptions"
+       |
+       |  case "$$prev" in
+       |    --color) COMPREPLY=($$(compgen -W "always auto never" -- "$$cur")); return ;;
+       |    --native-mode) COMPREPLY=($$(compgen -W "debug release-fast release-size release-full" -- "$$cur")); return ;;
+       |    --native-gc) COMPREPLY=($$(compgen -W "immix commix boehm none" -- "$$cur")); return ;;
+       |    --native-lto) COMPREPLY=($$(compgen -W "none thin full" -- "$$cur")); return ;;
+       |    --native-target) COMPREPLY=($$(compgen -W "app static dynamic" -- "$$cur")); return ;;
+       |    completions) COMPREPLY=($$(compgen -W "bash zsh fish" -- "$$cur")); return ;;
+       |    --main-class|--dep|--dependency|--compile-dep|--compile-only-dependency|-r|--repo|--repository| \\
+       |    -S|--scala|--scala-version|-O|--scalac-option|--scalac-opt|--watching|--watching-path| \\
+       |    --args-file|-o|--output|--test-framework|--native-clang|--native-clangpp|--native-linking| \\
+       |    --native-compile|--native-c-compile|--native-cpp-compile)
+       |      COMPREPLY=($$(compgen -f -- "$$cur")); return ;;
+       |  esac
+       |
+       |  if [[ "$$cur" == -* ]]; then
+       |    COMPREPLY=($$(compgen -W "$$options" -- "$$cur"))
+       |  elif [[ $$COMP_CWORD -eq 1 ]]; then
+       |    COMPREPLY=($$(compgen -W "$$subcommands" -- "$$cur") $$(compgen -f -- "$$cur"))
+       |  else
+       |    COMPREPLY=($$(compgen -f -- "$$cur"))
+       |  fi
+       |}
+       |complete -F _scalino scalino
+       |""".stripMargin
+
+  private def zshCompletion: String =
+    val subQuoted = completionSubcommands.split(" ").map(s => s"'$s'").mkString(" ")
+    val optQuoted = completionOptions.split(" ").map(s => s"'$s'").mkString(" ")
+    s"""#compdef scalino
+       |
+       |_scalino() {
+       |  local -a subcommands options
+       |  subcommands=($subQuoted)
+       |  options=($optQuoted)
+       |
+       |  case "$${words[CURRENT-1]}" in
+       |    --color) _values 'color' always auto never; return ;;
+       |    --native-mode) _values 'mode' debug release-fast release-size release-full; return ;;
+       |    --native-gc) _values 'gc' immix commix boehm none; return ;;
+       |    --native-lto) _values 'lto' none thin full; return ;;
+       |    --native-target) _values 'target' app static dynamic; return ;;
+       |    completions) _values 'shell' bash zsh fish; return ;;
+       |    --main-class|--dep|--dependency|--compile-dep|--compile-only-dependency|-r|--repo|--repository|\\
+       |    -S|--scala|--scala-version|-O|--scalac-option|--scalac-opt|--watching|--watching-path|\\
+       |    --args-file|-o|--output|--test-framework|--native-clang|--native-clangpp|--native-linking|\\
+       |    --native-compile|--native-c-compile|--native-cpp-compile)
+       |      _files; return ;;
+       |  esac
+       |
+       |  if [[ "$$words[CURRENT]" == -* ]]; then
+       |    _describe 'option' options
+       |  else
+       |    _alternative 'subcommands:subcommand:(($$subcommands))' 'files:file:_files'
+       |  fi
+       |}
+       |
+       |_scalino "$$@"
+       |""".stripMargin
+
+  private def fishCompletion: String =
+    val subFish = completionSubcommands.split(" ")
+      .map(s => s"complete -c scalino -n '__fish_use_subcommand' -f -a $s")
+      .mkString("\n")
+    val optFish = completionOptions.split(" ")
+      .filter(_.startsWith("--"))
+      .map(o => s"complete -c scalino -l ${o.stripPrefix("--")}")
+      .mkString("\n")
+    s"""function __fish_use_subcommand
+       |    set -l cmd (commandline -opc)
+       |    test (count $$cmd) -eq 1
+       |end
+       |
+       |$subFish
+       |
+       |$optFish
+       |
+       |complete -c scalino -l color -x -a "always auto never"
+       |complete -c scalino -l native-mode -x -a "debug release-fast release-size release-full"
+       |complete -c scalino -l native-gc -x -a "immix commix boehm none"
+       |complete -c scalino -l native-lto -x -a "none thin full"
+       |complete -c scalino -l native-target -x -a "app static dynamic"
+       |complete -c scalino -n '__fish_seen_subcommand_from completions' -f -a "bash zsh fish"
+       |""".stripMargin
+
+  def handleCompletions(args: Array[String]): Unit =
+    if args.length != 1 then die("completions: expected exactly one shell argument: bash, zsh, or fish")
+    args(0) match
+      case "bash" => print(bashCompletion)
+      case "zsh" => print(zshCompletion)
+      case "fish" => print(fishCompletion)
+      case other => die(s"completions: unsupported shell '$other' -- expected bash, zsh, or fish")
+
   def handleClean(args: Array[String]): Unit =
     if args.nonEmpty then die(s"clean: unexpected argument '${args(0)}'")
     val buildDir = Paths.get(".scalino-build")
@@ -2190,6 +2322,7 @@ object ScalinoCli:
       case "package" => handleRunOrCompile("package", args.drop(1))
       case "test" => handleTest(args.drop(1))
       case "setup-ide" => handleSetupIde(args.drop(1))
+      case "completions" => handleCompletions(args.drop(1))
       case "clean" => handleClean(args.drop(1))
       case first if first.startsWith("-") || Files.exists(Paths.get(first)) =>
         handleRunOrCompile("run", args) // implicit `run`, e.g. `scalino Foo.scala`
