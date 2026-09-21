@@ -1,8 +1,29 @@
 diff --git a/nir/src/main/scala/scala/scalanative/nir/ControlFlow.scala b/nir/src/main/scala/scala/scalanative/nir/ControlFlow.scala
-index c560028..1660462 100644
+index c560028..51487f0 100644
 --- a/nir/src/main/scala/scala/scalanative/nir/ControlFlow.scala
 +++ b/nir/src/main/scala/scala/scalanative/nir/ControlFlow.scala
-@@ -50,22 +50,41 @@ private[scalanative] object ControlFlow {
+@@ -43,29 +43,60 @@ private[scalanative] object ControlFlow {
+   final class Graph(
+       val entry: Block,
+       val all: Seq[Block],
+-      val find: mutable.Map[Local, Block]
+-  )
++      blocksById: mutable.LongMap[Block]
++  ) {
++
++    // `find` is public API (mutable.Map[Local, Block], used well beyond this
++    // file) but DirectCodeGen -- the hot path -- never touches it, only the
++    // legacy Lower.scala backend does. Building it eagerly meant boxing every
++    // block id/Local/Tuple2 on every Graph construction for nothing on the
++    // hot path. Lazy + built once from the unboxed LongMap on first access.
++    lazy val find: mutable.Map[Local, Block] = {
++      val m = mutable.Map.empty[Local, Block]
++      blocksById.foreach { case (id, b) => m(Local(id)) = b }
++      m
++    }
++  }
+ 
+   object Graph {
      def apply(insts: Seq[Inst]): Graph = {
        assert(insts.nonEmpty)
  
@@ -51,7 +72,7 @@ index c560028..1660462 100644
        var todo = List.empty[Block]
  
        def edge(from: Block, to: Block, next: Next) = {
-@@ -76,16 +95,13 @@ private[scalanative] object ControlFlow {
+@@ -76,16 +107,13 @@ private[scalanative] object ControlFlow {
  
        def block(local: Local)(implicit pos: SourcePosition): Block =
          blocks.getOrElseUpdate(
@@ -71,7 +92,7 @@ index c560028..1660462 100644
  
              val block = Block(n, params, body, isEntry = k == 0)
              todo ::= block
-@@ -132,24 +148,29 @@ private[scalanative] object ControlFlow {
+@@ -132,21 +160,19 @@ private[scalanative] object ControlFlow {
  
        val entryInst = insts.head.asInstanceOf[Inst.Label]
        val entry = block(entryInst.id)(entryInst.pos)
@@ -98,15 +119,4 @@ index c560028..1660462 100644
 +          blocks(id.id)
        }
  
--      new Graph(entry, all, blocks)
-+      // `find` is public API (mutable.Map[Local, Block], used well beyond
-+      // this file) -- converted from the unboxed LongMap once here, a single
-+      // O(blocks) pass, instead of keeping every lookup during construction
-+      // boxed the whole way through.
-+      val find = mutable.Map.empty[Local, Block]
-+      blocks.foreach { case (id, b) => find(Local(id)) = b }
-+
-+      new Graph(entry, all, find)
-     }
-   }
- 
+       new Graph(entry, all, blocks)
