@@ -204,14 +204,6 @@ if [[ "${#LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-# --gc commix --gc-stw-sweep: see docs/findings.md's commix investigation --
-# this step itself runs on the JVM (GC_NPROCS is meaningless here, it's a
-# knob read by the *compiled* commix runtime, not by this bootstrap JVM
-# process), but it controls what GC the resulting dist/scalino-linkdriver
-# binary is compiled with -- and THAT binary's own GC_NPROCS is what
-# actually matters, tuned proportionally to core count wherever
-# scalino-linkdriver is later invoked (00-env.sh's GC_NPROCS export, and
-# cli/ScalinoCli.scala's buildBinary for real end-user `scalino build`s).
 "$JAVA" \
   -cp "$DRIVER_CP" \
     LinkDriver \
@@ -223,8 +215,6 @@ fi
     info \
     --mode release-size \
     --multithreading \
-    --gc commix \
-    --gc-stw-sweep \
     "${LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]+"${LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]}"}"
 
 BUILT="$LINK_WORK/LinkDriver"

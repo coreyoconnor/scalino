@@ -176,25 +176,6 @@ object ScalinoCli:
     extraEnv.foreach { case (k, v) => pb.environment().put(k, v) }
     pb.start().waitFor()
 
-  /** dist/scalino-linkdriver is compiled with `--gc commix --gc-stw-sweep`
-   *  (see build/04-build-scalino-linkdriver.sh) -- commix's own thread-count
-   *  default (processorCount - 1, capped [1,8]) is tuned for a big,
-   *  long-running target program, not scalino-linkdriver's own short-lived,
-   *  modest-heap self-compile: see docs/findings.md's commix investigation,
-   *  ~30% of cores was the measured sweet spot there (a sharp, asymmetric
-   *  peak, not "fewer is always better"). Same proportional heuristic as
-   *  build/00-env.sh's GC_NPROCS default, kept in sync by hand -- this is
-   *  the path a real end user's `scalino build`/`run`/`package` actually
-   *  takes (00-env.sh only covers this project's own bootstrap scripts).
-   *  Only a default: an explicit GC_NPROCS already in the environment
-   *  always wins. */
-  def linkDriverGcNprocsEnv: Map[String, String] =
-    if sys.env.contains("GC_NPROCS") then Map.empty
-    else
-      val cores = Runtime.getRuntime.availableProcessors()
-      val tuned = math.min(8, math.max(2, cores * 3 / 10))
-      Map("GC_NPROCS" -> tuned.toString)
-
   /** Runs a command capturing stdout, with stderr passed straight through
    *  (matches `cs fetch --classpath`: download progress on stderr, the
    *  classpath value on stdout). */
@@ -1709,8 +1690,7 @@ object ScalinoCli:
       nativeOpts.cppCompile.flatMap(v => List("--cpp-compile", v))
 
     val linkExit = runInherited(
-      List(s"$dist/scalino-linkdriver", linkCp, linkDir.toString, mainClass, clang, clangpp, logLevel) ++ nativeFlags,
-      extraEnv = linkDriverGcNprocsEnv
+      List(s"$dist/scalino-linkdriver", linkCp, linkDir.toString, mainClass, clang, clangpp, logLevel) ++ nativeFlags
     )
     if linkExit != 0 then fail("linking failed")
 

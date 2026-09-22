@@ -134,32 +134,3 @@ require cs
 require "$JAVA"
 require "$JAVAC"
 require "$CLANG"
-
-# dist/scalino-linkdriver is compiled with --gc commix --gc-stw-sweep (see
-# 04-build-scalino-linkdriver.sh) -- commix's own default GC thread count
-# (Settings_GCThreadCount, processorCount - 1, capped [1,8]) is tuned for a
-# big, long-running target program with plenty of GC work to actually
-# parallelize. scalino-linkdriver's own self-compile is the opposite: a
-# short-lived process with a comparatively modest live heap, so that many GC
-# worker threads mostly just add wake/park + shared-cursor-contention
-# overhead without enough real sweep work per thread to amortize it. See
-# docs/findings.md's commix investigation: benchmarked on a 10-core
-# M-series host, GC_NPROCS=3 (30% of cores) was the clear sweet spot, ~20s
-# vs ~22.5s for stock immix, vs ~25-26s at 40/60/80% of cores, vs ~36s at
-# 20% -- a sharp, asymmetric peak, not a flat "fewer is always better"
-# curve. Only one host's worth of data exists for that peak, so this is a
-# proportional heuristic (30% of detected cores, floor 2, cap 8 to stay
-# within the range commix's own default already exercises), not a
-# precisely validated formula -- it scales with the machine instead of
-# hardcoding "3" for everyone, but should be revisited if profiling on a
-# very different core count ever shows a different-shaped curve. Only sets
-# a default: an existing GC_NPROCS in the environment always wins, so
-# anyone (this pipeline's own later scripts, or a real end user) can still
-# override it explicitly.
-if [[ -z "${GC_NPROCS:-}" ]]; then
-  CORES="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
-  GC_NPROCS=$(( CORES * 3 / 10 ))
-  [[ "$GC_NPROCS" -lt 2 ]] && GC_NPROCS=2
-  [[ "$GC_NPROCS" -gt 8 ]] && GC_NPROCS=8
-  export GC_NPROCS
-fi
