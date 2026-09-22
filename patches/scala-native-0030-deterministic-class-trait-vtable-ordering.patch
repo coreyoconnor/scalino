@@ -20,44 +20,54 @@ index d170391..d8310af 100644
      val ctx = universe.assignIds(ids)
      (traits, ctx)
 diff --git a/tools/src/main/scala/scala/scalanative/codegen/VirtualTable.scala b/tools/src/main/scala/scala/scalanative/codegen/VirtualTable.scala
-index ee92050..10c8959 100644
+index ee92050..a0ccfff 100644
 --- a/tools/src/main/scala/scala/scalanative/codegen/VirtualTable.scala
 +++ b/tools/src/main/scala/scala/scalanative/codegen/VirtualTable.scala
-@@ -28,7 +28,10 @@ private[codegen] class VirtualTable(cls: linker.Class)(implicit
+@@ -28,6 +28,9 @@ private[codegen] class VirtualTable(cls: linker.Class)(implicit
        impls(sig) = impl
      }
      slots.foreach { sig => addImpl(sig) }
--    cls.calls.foreach { sig =>
-+    // Sorted (see ScopeInfo.methods' own comment, Infos.scala) so a new
-+    // slot's assigned index depends only on which Sigs are reachable here,
-+    // not on `calls`' unstable hash-bucket iteration order.
-+    cls.calls.toSeq.sortBy(_.mangle).foreach { sig =>
++    // cls.calls is a SortedSet (see Infos.scala) so a new slot's assigned
++    // index depends only on which Sigs are reachable here, not on
++    // insertion order -- already in order, no sortBy needed here.
+     cls.calls.foreach { sig =>
        if (cls.targets(sig).size > 1) {
          if (!impls.contains(sig)) {
-           addSlot(sig)
 diff --git a/tools/src/main/scala/scala/scalanative/linker/Infos.scala b/tools/src/main/scala/scala/scalanative/linker/Infos.scala
-index b3dee07..5fe0c3c 100644
+index b3dee07..4c4f3d8 100644
 --- a/tools/src/main/scala/scala/scalanative/linker/Infos.scala
 +++ b/tools/src/main/scala/scala/scalanative/linker/Infos.scala
-@@ -18,7 +18,16 @@ sealed abstract class ScopeInfo extends Info {
-   val calls = mutable.Set.empty[nir.Sig]
+@@ -15,7 +15,28 @@ sealed abstract class ScopeInfo extends Info {
+   override def name: nir.Global.Top
+   def ty: nir.Type.Ref = nir.Type.Ref(name)
+   val members = mutable.UnrolledBuffer.empty[MemberInfo]
+-  val calls = mutable.Set.empty[nir.Sig]
++  // SortedSet (ordered by Sig.mangle, the only stable key Sig has -- Sig
++  // itself has no Ordering, so one's given locally here rather than adding
++  // a top-level implicit -- nir/Sig.scala isn't in either patch's source
++  // list) so vtable-slot assignment (VirtualTable.scala) and itable method
++  // layout (ITable.scala) -- both of
++  // which number entries by `methods`'/this set's iteration position --
++  // depend only on which Sigs are reachable, not on insertion order (calls
++  // is populated incrementally as Reach's single-threaded worklist visits
++  // call sites; an unrelated edit elsewhere in the reachable graph can
++  // reorder that walk's visitation order for the exact same final reachable
++  // Sig set, silently reshuffling every embedded vtable/itable index
++  // otherwise). Keeping the set itself sorted (insert is O(log n)) means
++  // `methods` -- read twice per trait in ITable.scala, once per class in
++  // VirtualTable.scala and Lower.scala -- no longer pays an O(n log n)
++  // sortBy on every read; it's already in order.
++  // Declared type stays mutable.Set, not SortedSet, matching `subclasses`
++  // below: keeps callers outside SHARED_SOURCES binary-compatible against
++  // the stock published jar's erased `Set`-returning signature.
++  val calls: mutable.Set[nir.Sig] = {
++    implicit val sigOrdering: Ordering[nir.Sig] = Ordering.by(_.mangle)
++    mutable.SortedSet.empty[nir.Sig]
++  }
    val responds = mutable.Map.empty[nir.Sig, nir.Global.Member]
  
--  def methods = calls.toSeq.filter(_.isVirtual)
-+  // Sorted (by Sig.mangle, the only stable key Sig has) so vtable-slot
-+  // assignment (VirtualTable.scala) and itable method layout (ITable.scala)
-+  // -- both of which number entries by THIS Seq's position -- depend only
-+  // on which Sigs are reachable, not on `calls`' own hash-bucket iteration
-+  // order, which is insertion-sequence-dependent (calls is populated
-+  // incrementally as Reach's single-threaded worklist visits call sites;
-+  // an unrelated edit elsewhere in the reachable graph can reorder that
-+  // walk's visitation order for the exact same final reachable Sig set,
-+  // silently reshuffling every embedded vtable/itable index otherwise).
-+  def methods = calls.toSeq.filter(_.isVirtual).sortBy(_.mangle)
- 
-   def isClass: Boolean = this.isInstanceOf[Class]
-   def isTrait: Boolean = this.isInstanceOf[Trait]
-@@ -112,7 +121,31 @@ final class Class(
+   def methods = calls.toSeq.filter(_.isVirtual)
+@@ -112,7 +133,31 @@ final class Class(
  )(implicit val position: nir.SourcePosition)
      extends ScopeInfo {
    val implementors = mutable.SortedSet[Class](this)
