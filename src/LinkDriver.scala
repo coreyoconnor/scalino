@@ -32,6 +32,7 @@ object LinkDriver:
     multithreading: Boolean = false,
     directCodegen: Boolean = false,
     gcStwSweep: Boolean = false,
+    incrementalCompilation: Boolean = false,
     linking: List[String] = Nil,
     compile: List[String] = Nil,
     cCompile: List[String] = Nil,
@@ -51,6 +52,7 @@ object LinkDriver:
         case "--multithreading" => o = o.copy(multithreading = true)
         case "--direct-codegen" => o = o.copy(directCodegen = true)
         case "--gc-stw-sweep" => o = o.copy(gcStwSweep = true)
+        case "--incremental-compilation" => o = o.copy(incrementalCompilation = true)
         case "--linking" => o = o.copy(linking = o.linking :+ rest(i + 1)); i += 1
         case "--compile" => o = o.copy(compile = o.compile :+ rest(i + 1)); i += 1
         case "--c-compile" => o = o.copy(cCompile = o.cCompile :+ rest(i + 1)); i += 1
@@ -123,7 +125,7 @@ object LinkDriver:
           // the flag to have an effect -- always on, same as every other
           // path, regardless of the direct-codegen flag.
           .withSourceLevelDebuggingConfig(SourceLevelDebuggingConfig.enabled)
-          .withIncrementalCompilation(true)
+          .withIncrementalCompilation(opts.incrementalCompilation)
       )
 
     val outPath = Scope.apply[java.nio.file.Path] { (s: Scope) =>

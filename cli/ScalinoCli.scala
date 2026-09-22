@@ -1045,7 +1045,7 @@ object ScalinoCli:
       val linkCp = s"$probeClasses$CP_SEP$userClassesDir$CP_SEP${cc.nativelibsCp}$CP_SEP$testClasspath"
       val clang = findOnPath("clang")
       val clangpp = findOnPath("clang++")
-      val linkExit = runInherited(List(s"$dist/scalino-linkdriver", linkCp, linkDir.toString, "ScalinoCliProbeMain", clang, clangpp, logLevel), extraEnv = linkDriverGcNprocsEnv)
+      val linkExit = runInherited(List(s"$dist/scalino-linkdriver", linkCp, linkDir.toString, "ScalinoCliProbeMain", clang, clangpp, logLevel))
       if linkExit != 0 then fail("linking the test-framework probe failed")
       val produced = linkDir.resolve("ScalinoCliProbeMain")
       val actual = if Files.exists(produced) then produced else linkDir.resolve("sncliprobemain")
@@ -1682,6 +1682,7 @@ object ScalinoCli:
       nativeOpts.target.toList.flatMap(v => List("--target", v)) ++
       (if nativeOpts.embedResources then List("--embed-resources") else Nil) ++
       (if nativeOpts.multithreading then List("--multithreading") else Nil) ++
+      (if incremental then List("--incremental-compilation") else Nil) ++
       (if nativeOpts.directCodegen then List("--direct-codegen") else Nil) ++
       (if nativeOpts.gcStwSweep then List("--gc-stw-sweep") else Nil) ++
       nativeOpts.linking.flatMap(v => List("--linking", v)) ++
