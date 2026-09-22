@@ -1,0 +1,53 @@
+diff --git a/language-server/src/dotty/tools/languageserver/Lsp.scala b/language-server/src/dotty/tools/languageserver/Lsp.scala
+index e9595a56..dc93d90b 100644
+--- a/language-server/src/dotty/tools/languageserver/Lsp.scala
++++ b/language-server/src/dotty/tools/languageserver/Lsp.scala
+@@ -125,13 +125,10 @@ object Lsp {
+   // -- .dotty-ide.json (replaces config.ProjectConfig + Jackson) -----------
+ 
+   final case class ProjectConfig(
+-    id: String,
+-    compilerVersion: String,
+     compilerArguments: List[String],
+     sourceDirectories: List[String],
+     dependencyClasspath: List[String],
+-    classDirectory: String,
+-    projectDependencies: List[String])
++    classDirectory: String)
+ 
+   // -- JSON-RPC envelopes ---------------------------------------------------
+ 
+@@ -1066,32 +1063,26 @@ object Lsp {
+     def nullValue: ProjectConfig = null
+     def decodeValue(in: JsonReader, default: ProjectConfig): ProjectConfig =
+       if (in.isNextToken('{')) {
+-        var id: String = null
+-        var compilerVersion: String = null
+         var compilerArguments: List[String] = Nil
+         var sourceDirectories: List[String] = Nil
+         var dependencyClasspath: List[String] = Nil
+         var classDirectory: String = null
+-        var projectDependencies: List[String] = Nil
+         if (!in.isNextToken('}')) {
+           in.rollbackToken()
+           var continue = true
+           while (continue) {
+             in.readKeyAsString() match {
+-              case "id" => id = in.readString(null)
+-              case "compilerVersion" => compilerVersion = in.readString(null)
+               case "compilerArguments" => compilerArguments = decodeStringList(in)
+               case "sourceDirectories" => sourceDirectories = decodeStringList(in)
+               case "dependencyClasspath" => dependencyClasspath = decodeStringList(in)
+               case "classDirectory" => classDirectory = in.readString(null)
+-              case "projectDependencies" => projectDependencies = decodeStringList(in)
+               case _ => skipVal(in)
+             }
+             continue = in.isNextToken(',')
+           }
+           if (!in.isCurrentToken('}')) in.objectEndOrCommaError()
+         }
+-        ProjectConfig(id, compilerVersion, compilerArguments, sourceDirectories, dependencyClasspath, classDirectory, projectDependencies)
++        ProjectConfig(compilerArguments, sourceDirectories, dependencyClasspath, classDirectory)
+       } else in.readNullOrTokenError(default, '{')
+     def encodeValue(x: ProjectConfig, out: JsonWriter): Unit = ???
+   }

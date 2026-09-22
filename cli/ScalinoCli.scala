@@ -2159,18 +2159,14 @@ object ScalinoCli:
     val dependencyClasspath = cc.compileCp.split(CP_SEP).filter(_.nonEmpty).toList
     val classDirectory = Paths.get(".scalino-build", ".dotty-ide-classes").toAbsolutePath
     Files.createDirectories(classDirectory)
-    val projectId = Option(Paths.get(".").toAbsolutePath.normalize.getFileName).map(_.toString).getOrElse("root")
 
     val json =
       s"""[
          |  {
-         |    "id": ${jsonStr(projectId)},
-         |    "compilerVersion": ${jsonStr(BuildInfo.scalaVersion)},
          |    "compilerArguments": ${jsonArr(compilerArguments)},
          |    "sourceDirectories": ${jsonArr(sourceDirectories)},
          |    "dependencyClasspath": ${jsonArr(dependencyClasspath)},
-         |    "classDirectory": ${jsonStr(classDirectory.toString)},
-         |    "projectDependencies": []
+         |    "classDirectory": ${jsonStr(classDirectory.toString)}
          |  }
          |]
          |""".stripMargin
