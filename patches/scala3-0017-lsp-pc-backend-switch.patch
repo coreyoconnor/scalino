@@ -981,7 +981,7 @@ diff --git a/language-server/src/dotty/tools/languageserver/Main.scala b/languag
 index 7f269eec..d2cddb3d 100644
 --- a/language-server/src/dotty/tools/languageserver/Main.scala
 +++ b/language-server/src/dotty/tools/languageserver/Main.scala
-@@ -1,28 +1,60 @@
+@@ -1,28 +1,62 @@
  package dotty.tools
  package languageserver
  
@@ -1012,8 +1012,10 @@ index 7f269eec..d2cddb3d 100644
 +object Log {
 +  private val writer =
 +    try
-+      new File(".scalino-build").mkdirs()
-+      Some(new PrintWriter(new FileWriter(".scalino-build/scalino-lsp.log", /* append = */ true), /* autoFlush = */ true))
++      val file = new File(".scalino-build/scalino-lsp.log")
++      if (file.exists())
++        Some(new PrintWriter(new FileWriter(file, /* append = */ true), /* autoFlush = */ true))
++      else None
 +    catch { case _: Throwable => None }
  
 -/** Run the Dotty Language Server.

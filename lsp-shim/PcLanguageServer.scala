@@ -91,9 +91,7 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
 
     val warmup = new Thread(() => {
       try {
-        System.err.println("PC warmup: thread running"); System.err.flush()
         val configs = loadConfig(rootUri)
-        System.err.println(s"PC warmup: config loaded, ${configs.size} project(s)"); System.err.flush()
         val classpath: Seq[Path] =
           configs.flatMap(c => c.classDirectory +: c.dependencyClasspath).distinct.map(Paths.get(_))
         val sourceDirs: Seq[Path] =
@@ -104,19 +102,16 @@ class PcLanguageServer(publishDiagnostics: (String, List[Lsp.Diagnostic]) => Uni
         // its own `config.compilerArguments` usage).
         val compilerArgs: List[String] =
           configs.flatMap(_.compilerArguments).distinct
-        System.err.println(s"PC warmup: about to construct PC, classpath=${classpath.size} entries, sourceDirs=${sourceDirs.size}"); System.err.flush()
         val built = RawScalaPresentationCompiler(
           buildTargetIdentifier = "scalino",
           classpath = classpath,
           options = compilerArgs,
           sourcePath = () => sourceDirs.asJava
         )
-        System.err.println("PC warmup: PC constructed"); System.err.flush()
         thisServer.synchronized {
           pc = built
           thisServer.notifyAll()
         }
-        System.err.println("PC warmup: done, notified"); System.err.flush()
       } catch {
         case ex: Throwable =>
           System.err.println(s"PC warmup failed: ${ex.getClass.getName}: ${ex.getMessage}")
