@@ -169,11 +169,31 @@ object ScalinoCli:
    *  output the user should just see directly: cs downloading, scalino-dotc's
    *  own errors, scalino-linkdriver's build log, and the final program.
    */
-  def runInherited(cmd: List[String], cwd: Option[Path] = None): Int =
+  def runInherited(cmd: List[String], cwd: Option[Path] = None, extraEnv: Map[String, String] = Map.empty): Int =
     val pb = new JProcessBuilder(cmd.asJava)
     pb.inheritIO()
     cwd.foreach(p => pb.directory(p.toFile))
+    extraEnv.foreach { case (k, v) => pb.environment().put(k, v) }
     pb.start().waitFor()
+
+  /** dist/scalino-linkdriver is compiled with `--gc commix --gc-stw-sweep`
+   *  (see build/04-build-scalino-linkdriver.sh) -- commix's own thread-count
+   *  default (processorCount - 1, capped [1,8]) is tuned for a big,
+   *  long-running target program, not scalino-linkdriver's own short-lived,
+   *  modest-heap self-compile: see docs/findings.md's commix investigation,
+   *  ~30% of cores was the measured sweet spot there (a sharp, asymmetric
+   *  peak, not "fewer is always better"). Same proportional heuristic as
+   *  build/00-env.sh's GC_NPROCS default, kept in sync by hand -- this is
+   *  the path a real end user's `scalino build`/`run`/`package` actually
+   *  takes (00-env.sh only covers this project's own bootstrap scripts).
+   *  Only a default: an explicit GC_NPROCS already in the environment
+   *  always wins. */
+  def linkDriverGcNprocsEnv: Map[String, String] =
+    if sys.env.contains("GC_NPROCS") then Map.empty
+    else
+      val cores = Runtime.getRuntime.availableProcessors()
+      val tuned = math.min(8, math.max(2, cores * 3 / 10))
+      Map("GC_NPROCS" -> tuned.toString)
 
   /** Runs a command capturing stdout, with stderr passed straight through
    *  (matches `cs fetch --classpath`: download progress on stderr, the
@@ -225,6 +245,7 @@ object ScalinoCli:
     nativeEmbedResources: Option[Boolean],
     nativeMultithreading: Option[Boolean],
     nativeDirectCodegen: Option[Boolean],
+    nativeGcStwSweep: Option[Boolean],
     jars: List[String],
     testOptions: List[String],
     resourceDirs: List[String],
@@ -248,7 +269,7 @@ object ScalinoCli:
     "repository", "repositories", "file", "files", "exclude",
     "nativeMode", "nativeGc", "nativeLto", "nativeClang", "nativeClangPP", "nativeClangPp",
     "nativeLinking", "nativeCompile", "nativeCCompile", "nativeCppCompile", "nativeTarget",
-    "nativeEmbedResources", "nativeMultithreading", "nativeDirectCodegen"
+    "nativeEmbedResources", "nativeMultithreading", "nativeDirectCodegen", "nativeGcStwSweep"
     // deliberately NOT "nativeVersion": this toolchain only ever targets the
     // one pinned scala-native version it was built for (see the "scala"
     // directive's own version-mismatch warning below for the same reason) --
@@ -304,6 +325,7 @@ object ScalinoCli:
     var nativeEmbedResources = Option.empty[Boolean]
     var nativeMultithreading = Option.empty[Boolean]
     var nativeDirectCodegen = Option.empty[Boolean]
+    var nativeGcStwSweep = Option.empty[Boolean]
     var jars = List.empty[String]
     var testOptions = List.empty[String]
     var resourceDirs = List.empty[String]
@@ -348,11 +370,12 @@ object ScalinoCli:
         directiveBool(line, "nativeEmbedResources").foreach(v => nativeEmbedResources = Some(v))
         directiveBool(line, "nativeMultithreading").foreach(v => nativeMultithreading = Some(v))
         directiveBool(line, "nativeDirectCodegen").foreach(v => nativeDirectCodegen = Some(v))
+        directiveBool(line, "nativeGcStwSweep").foreach(v => nativeGcStwSweep = Some(v))
     Directives(
       deps.distinct, compileOnlyDeps.distinct, testDeps.distinct, scalaVersion, mainClass, options, testFramework,
       nativeMode, nativeGc, nativeLto, nativeClang, nativeClangPP,
       nativeLinking, nativeCompile, nativeCCompile, nativeCppCompile,
-      nativeTarget, nativeEmbedResources, nativeMultithreading, nativeDirectCodegen,
+      nativeTarget, nativeEmbedResources, nativeMultithreading, nativeDirectCodegen, nativeGcStwSweep,
       jars.distinct, testOptions, resourceDirs.distinct, repositories.distinct
     )
 
@@ -1041,7 +1064,7 @@ object ScalinoCli:
       val linkCp = s"$probeClasses$CP_SEP$userClassesDir$CP_SEP${cc.nativelibsCp}$CP_SEP$testClasspath"
       val clang = findOnPath("clang")
       val clangpp = findOnPath("clang++")
-      val linkExit = runInherited(List(s"$dist/scalino-linkdriver", linkCp, linkDir.toString, "ScalinoCliProbeMain", clang, clangpp, logLevel))
+      val linkExit = runInherited(List(s"$dist/scalino-linkdriver", linkCp, linkDir.toString, "ScalinoCliProbeMain", clang, clangpp, logLevel), extraEnv = linkDriverGcNprocsEnv)
       if linkExit != 0 then fail("linking the test-framework probe failed")
       val produced = linkDir.resolve("ScalinoCliProbeMain")
       val actual = if Files.exists(produced) then produced else linkDir.resolve("sncliprobemain")
@@ -1589,6 +1612,7 @@ object ScalinoCli:
     embedResources: Boolean = false,
     multithreading: Boolean = true,
     directCodegen: Boolean = true,
+    gcStwSweep: Boolean = false,
     linking: List[String] = Nil,
     compile: List[String] = Nil,
     cCompile: List[String] = Nil,
@@ -1622,6 +1646,8 @@ object ScalinoCli:
       directCodegen = directives.nativeDirectCodegen
         .orElse(o.cliNativeDirectCodegen)
         .getOrElse(!sys.props.getOrElse("os.name", "").toLowerCase.startsWith("windows")),
+      // Opt-in, commix GC only: see NativeConfig.gcStwSweep.
+      gcStwSweep = directives.nativeGcStwSweep.getOrElse(false) || o.cliNativeGcStwSweep,
       linking = directives.nativeLinking ++ o.cliNativeLinking,
       compile = directives.nativeCompile ++ o.cliNativeCompile,
       cCompile = directives.nativeCCompile ++ o.cliNativeCCompile,
@@ -1676,13 +1702,15 @@ object ScalinoCli:
       (if nativeOpts.embedResources then List("--embed-resources") else Nil) ++
       (if nativeOpts.multithreading then List("--multithreading") else Nil) ++
       (if nativeOpts.directCodegen then List("--direct-codegen") else Nil) ++
+      (if nativeOpts.gcStwSweep then List("--gc-stw-sweep") else Nil) ++
       nativeOpts.linking.flatMap(v => List("--linking", v)) ++
       nativeOpts.compile.flatMap(v => List("--compile", v)) ++
       nativeOpts.cCompile.flatMap(v => List("--c-compile", v)) ++
       nativeOpts.cppCompile.flatMap(v => List("--cpp-compile", v))
 
     val linkExit = runInherited(
-      List(s"$dist/scalino-linkdriver", linkCp, linkDir.toString, mainClass, clang, clangpp, logLevel) ++ nativeFlags
+      List(s"$dist/scalino-linkdriver", linkCp, linkDir.toString, mainClass, clang, clangpp, logLevel) ++ nativeFlags,
+      extraEnv = linkDriverGcNprocsEnv
     )
     if linkExit != 0 then fail("linking failed")
 
@@ -1786,6 +1814,11 @@ object ScalinoCli:
          |                                        toolchain itself running as compiled Scala Native
          |                                        code with a discoverable libLLVM, else it's a
          |                                        silent no-op; pass =false to opt out)
+         |  --native-gc-stw-sweep      commix GC only: keep mutators paused through the
+         |                             parallel sweep too, instead of resuming them once
+         |                             marking finishes (off by default; throughput over
+         |                             concurrency -- trades commix's concurrent/lazy sweep
+         |                             bookkeeping for a longer, fully parallel STW pause)
          |
          |directives (in source files), one per line -- `dep`/`options`/etc also
          |accept scala-cli's own longer spellings (`dependency`/`scalacOption`/...):
@@ -1817,6 +1850,7 @@ object ScalinoCli:
          |  //> using nativeEmbedResources true
          |  //> using nativeMultithreading false   (on by default)
          |  //> using nativeDirectCodegen false   (on by default except on Windows)
+         |  //> using nativeGcStwSweep true   (commix GC only; off by default)
          |
          |`test` auto-detects the test framework structurally (scans the resolved
          |test classpath for a class implementing sbt.testing.Framework -- no
@@ -1873,7 +1907,8 @@ object ScalinoCli:
     cliNativeCppCompile: List[String] = Nil,
     cliEmbedResources: Boolean = false,
     cliNativeMultithreading: Option[Boolean] = None,
-    cliNativeDirectCodegen: Option[Boolean] = None
+    cliNativeDirectCodegen: Option[Boolean] = None,
+    cliNativeGcStwSweep: Boolean = false
   ):
     // scala-cli-style: -v shows the full build-tool debug trace (raw
     // clang/linker invocations, NativeConfig dumps), the default ("info")
@@ -1933,6 +1968,7 @@ object ScalinoCli:
           if (v != "true" && v != "false")
             die(s"--native-direct-codegen=$v: expected true or false")
           o = o.copy(cliNativeDirectCodegen = Some(v == "true"))
+        case "--native-gc-stw-sweep" => o = o.copy(cliNativeGcStwSweep = true)
         case f if f.startsWith("-") => die(s"unknown option: $f")
         case f => o = o.copy(sources = o.sources :+ Paths.get(f))
       i += 1
@@ -2199,7 +2235,7 @@ object ScalinoCli:
     "--color --test-framework --no-incremental --native-mode --native-gc --native-lto " +
     "--native-clang --native-clangpp --native-linking --native-compile --native-c-compile " +
     "--native-cpp-compile --native-target --embed-resources --native-multithreading " +
-    "--native-direct-codegen -h --help"
+    "--native-direct-codegen --native-gc-stw-sweep -h --help"
 
   private def bashCompletion: String =
     s"""_scalino() {

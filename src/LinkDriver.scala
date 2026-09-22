@@ -31,6 +31,7 @@ object LinkDriver:
     embedResources: Boolean = false,
     multithreading: Boolean = false,
     directCodegen: Boolean = false,
+    gcStwSweep: Boolean = false,
     linking: List[String] = Nil,
     compile: List[String] = Nil,
     cCompile: List[String] = Nil,
@@ -49,6 +50,7 @@ object LinkDriver:
         case "--embed-resources" => o = o.copy(embedResources = true)
         case "--multithreading" => o = o.copy(multithreading = true)
         case "--direct-codegen" => o = o.copy(directCodegen = true)
+        case "--gc-stw-sweep" => o = o.copy(gcStwSweep = true)
         case "--linking" => o = o.copy(linking = o.linking :+ rest(i + 1)); i += 1
         case "--compile" => o = o.copy(compile = o.compile :+ rest(i + 1)); i += 1
         case "--c-compile" => o = o.copy(cCompile = o.cCompile :+ rest(i + 1)); i += 1
@@ -115,6 +117,7 @@ object LinkDriver:
           .withEmbedResources(opts.embedResources)
           .withMultithreading(if opts.multithreading then Some(true) else None)
           .withLLVMDirectCodeGen(opts.directCodegen)
+          .withGCStwSweep(opts.gcStwSweep)
           // DirectCodeGen now has its own (scoped) DIBuilder-based debug-info
           // support (Phase 3), so debug info no longer needs forcing off for
           // the flag to have an effect -- always on, same as every other
