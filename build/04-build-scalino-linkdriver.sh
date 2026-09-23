@@ -205,6 +205,7 @@ if [[ "${#LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]}" -eq 0 ]]; then
 fi
 
 "$JAVA" \
+  -XX:MaxRAMPercentage=80.0 \
   -cp "$DRIVER_CP" \
     LinkDriver \
     "$(to_native_path "$NATIVE_DRIVER_CP")" \
@@ -213,7 +214,7 @@ fi
     "$CLANG" \
     "$CLANGPP" \
     info \
-    --mode release-size \
+    --mode release-fast \
     --multithreading \
     "${LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]+"${LLVM_DIRECT_CODEGEN_LINKING_OPTS[@]}"}"
 

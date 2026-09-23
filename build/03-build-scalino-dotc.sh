@@ -122,6 +122,7 @@ mkdir -p "$LINK_WORK"
 # comment for the full explanation.
 DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools-patched-jvm.cp")$CP_SEP$(to_native_path "$WORK/driver-classes")"
 "$JAVA" \
+  -XX:MaxRAMPercentage=80.0 \
   -cp "$DRIVER_CP" \
     LinkDriver \
     "$(to_native_path "$NIR_OUT")$CP_SEP$(cat "$NATIVELIBS_CP")" \
@@ -130,7 +131,7 @@ DRIVER_CP="$(cat "$WORK/compiler.cp")$CP_SEP$(cat "$WORK/tools-patched-jvm.cp")$
     "$CLANG" \
     "$CLANGPP" \
     info \
-    --mode release-size \
+    --mode release-fast \
     --multithreading \
     --embed-resources
 
