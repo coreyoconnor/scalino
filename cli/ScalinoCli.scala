@@ -227,6 +227,7 @@ object ScalinoCli:
     nativeMultithreading: Option[Boolean],
     nativeDirectCodegen: Option[Boolean],
     nativeGcStwSweep: Option[Boolean],
+    nativeHeapHistogram: Option[Boolean],
     jars: List[String],
     testOptions: List[String],
     resourceDirs: List[String],
@@ -250,7 +251,7 @@ object ScalinoCli:
     "repository", "repositories", "file", "files", "exclude",
     "nativeMode", "nativeGc", "nativeLto", "nativeClang", "nativeClangPP", "nativeClangPp",
     "nativeLinking", "nativeCompile", "nativeCCompile", "nativeCppCompile", "nativeTarget",
-    "nativeEmbedResources", "nativeMultithreading", "nativeDirectCodegen", "nativeGcStwSweep"
+    "nativeEmbedResources", "nativeMultithreading", "nativeDirectCodegen", "nativeGcStwSweep", "nativeHeapHistogram"
     // deliberately NOT "nativeVersion": this toolchain only ever targets the
     // one pinned scala-native version it was built for (see the "scala"
     // directive's own version-mismatch warning below for the same reason) --
@@ -307,6 +308,7 @@ object ScalinoCli:
     var nativeMultithreading = Option.empty[Boolean]
     var nativeDirectCodegen = Option.empty[Boolean]
     var nativeGcStwSweep = Option.empty[Boolean]
+    var nativeHeapHistogram = Option.empty[Boolean]
     var jars = List.empty[String]
     var testOptions = List.empty[String]
     var resourceDirs = List.empty[String]
@@ -352,11 +354,12 @@ object ScalinoCli:
         directiveBool(line, "nativeMultithreading").foreach(v => nativeMultithreading = Some(v))
         directiveBool(line, "nativeDirectCodegen").foreach(v => nativeDirectCodegen = Some(v))
         directiveBool(line, "nativeGcStwSweep").foreach(v => nativeGcStwSweep = Some(v))
+        directiveBool(line, "nativeHeapHistogram").foreach(v => nativeHeapHistogram = Some(v))
     Directives(
       deps.distinct, compileOnlyDeps.distinct, testDeps.distinct, scalaVersion, mainClass, options, testFramework,
       nativeMode, nativeGc, nativeLto, nativeClang, nativeClangPP,
       nativeLinking, nativeCompile, nativeCCompile, nativeCppCompile,
-      nativeTarget, nativeEmbedResources, nativeMultithreading, nativeDirectCodegen, nativeGcStwSweep,
+      nativeTarget, nativeEmbedResources, nativeMultithreading, nativeDirectCodegen, nativeGcStwSweep, nativeHeapHistogram,
       jars.distinct, testOptions, resourceDirs.distinct, repositories.distinct
     )
 
@@ -1594,6 +1597,7 @@ object ScalinoCli:
     multithreading: Boolean = true,
     directCodegen: Boolean = true,
     gcStwSweep: Boolean = false,
+    heapHistogram: Boolean = false,
     linking: List[String] = Nil,
     compile: List[String] = Nil,
     cCompile: List[String] = Nil,
@@ -1629,6 +1633,11 @@ object ScalinoCli:
         .getOrElse(!sys.props.getOrElse("os.name", "").toLowerCase.startsWith("windows")),
       // Opt-in, commix GC only: see NativeConfig.gcStwSweep.
       gcStwSweep = directives.nativeGcStwSweep.getOrElse(false) || o.cliNativeGcStwSweep,
+      // Opt-in: gates SCALINO_HEAP_HISTOGRAM at C compile time -- see
+      // LinkDriver.scala's withCOptions. Off by default since the feature's
+      // always-linked static table otherwise bloats every binary by ~7.5MB
+      // regardless of whether it's ever used at runtime.
+      heapHistogram = directives.nativeHeapHistogram.getOrElse(false) || o.cliNativeHeapHistogram,
       linking = directives.nativeLinking ++ o.cliNativeLinking,
       compile = directives.nativeCompile ++ o.cliNativeCompile,
       cCompile = directives.nativeCCompile ++ o.cliNativeCCompile,
@@ -1685,6 +1694,7 @@ object ScalinoCli:
       (if incremental then List("--incremental-compilation") else Nil) ++
       (if nativeOpts.directCodegen then List("--direct-codegen") else Nil) ++
       (if nativeOpts.gcStwSweep then List("--gc-stw-sweep") else Nil) ++
+      (if nativeOpts.heapHistogram then List("--heap-histogram") else Nil) ++
       nativeOpts.linking.flatMap(v => List("--linking", v)) ++
       nativeOpts.compile.flatMap(v => List("--compile", v)) ++
       nativeOpts.cCompile.flatMap(v => List("--c-compile", v)) ++
@@ -1832,6 +1842,7 @@ object ScalinoCli:
          |  //> using nativeMultithreading false   (on by default)
          |  //> using nativeDirectCodegen false   (on by default except on Windows)
          |  //> using nativeGcStwSweep true   (commix GC only; off by default)
+         |  //> using nativeHeapHistogram true   (live-heap histogram GC debug dump; off by default, adds ~7.5MB to binary)
          |
          |`test` auto-detects the test framework structurally (scans the resolved
          |test classpath for a class implementing sbt.testing.Framework -- no
@@ -1889,7 +1900,8 @@ object ScalinoCli:
     cliEmbedResources: Boolean = false,
     cliNativeMultithreading: Option[Boolean] = None,
     cliNativeDirectCodegen: Option[Boolean] = None,
-    cliNativeGcStwSweep: Boolean = false
+    cliNativeGcStwSweep: Boolean = false,
+    cliNativeHeapHistogram: Boolean = false
   ):
     // scala-cli-style: -v shows the full build-tool debug trace (raw
     // clang/linker invocations, NativeConfig dumps), the default ("info")
@@ -1950,6 +1962,7 @@ object ScalinoCli:
             die(s"--native-direct-codegen=$v: expected true or false")
           o = o.copy(cliNativeDirectCodegen = Some(v == "true"))
         case "--native-gc-stw-sweep" => o = o.copy(cliNativeGcStwSweep = true)
+        case "--native-heap-histogram" => o = o.copy(cliNativeHeapHistogram = true)
         case f if f.startsWith("-") => die(s"unknown option: $f")
         case f => o = o.copy(sources = o.sources :+ Paths.get(f))
       i += 1

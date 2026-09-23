@@ -32,6 +32,7 @@ object LinkDriver:
     multithreading: Boolean = false,
     directCodegen: Boolean = false,
     gcStwSweep: Boolean = false,
+    heapHistogram: Boolean = false,
     incrementalCompilation: Boolean = false,
     linking: List[String] = Nil,
     compile: List[String] = Nil,
@@ -52,6 +53,7 @@ object LinkDriver:
         case "--multithreading" => o = o.copy(multithreading = true)
         case "--direct-codegen" => o = o.copy(directCodegen = true)
         case "--gc-stw-sweep" => o = o.copy(gcStwSweep = true)
+        case "--heap-histogram" => o = o.copy(heapHistogram = true)
         case "--incremental-compilation" => o = o.copy(incrementalCompilation = true)
         case "--linking" => o = o.copy(linking = o.linking :+ rest(i + 1)); i += 1
         case "--compile" => o = o.copy(compile = o.compile :+ rest(i + 1)); i += 1
@@ -110,7 +112,14 @@ object LinkDriver:
           // place of, these defaults.
           .withLinkingOptions(Discover.linkingOptions() ++ opts.linking)
           .withCompileOptions(Discover.compileOptions() ++ opts.compile)
-          .withCOptions(opts.cCompile)
+          // SCALINO_HEAP_HISTOGRAM gates the whole live-heap-histogram GC
+          // debug feature (patches/scala-native-0041, on top of the feature
+          // itself from patches/scala-native-0005) at C compile time --
+          // undefined by default, since the always-linked-in histogramTable
+          // (~7.5MB static table) and Histogram_dump code otherwise bloat
+          // every binary regardless of whether SCALANATIVE_HEAP_HISTOGRAM_FILE
+          // is ever set at runtime.
+          .withCOptions(opts.cCompile ++ (if opts.heapHistogram then Seq("-DSCALINO_HEAP_HISTOGRAM") else Seq.empty))
           .withCppOptions(opts.cppCompile)
           .withMode(mode)
           .withGC(gc)
