@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>scalino heap graph viewer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f4;
+    --fg: #1c1c1a;
+    --muted: #6b6b66;
+    --border: #cfcfc8;
+    --panel: #ffffff;
+    --accent: #3b5bdb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    padding: 12px 16px 6px;
+  }
+  h1 {
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--muted);
+    margin: 0 0 4px;
+    letter-spacing: 0.02em;
+  }
+  h2 {
+    font-size: 22px;
+    margin: 0 0 6px;
+  }
+  .stat { color: var(--muted); }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    align-items: center;
+    padding: 8px 16px 12px;
+  }
+  .controls label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+  }
+  .controls input[type="text"], .controls select {
+    font: inherit;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--panel);
+    color: var(--fg);
+  }
+  .controls input[type="text"] { width: 220px; }
+  .controls input[type="file"] { font: inherit; }
+  #breadcrumb {
+    padding: 4px 16px;
+    color: var(--muted);
+    min-height: 1.4em;
+  }
+  #breadcrumb span {
+    cursor: pointer;
+    color: var(--accent);
+  }
+  #breadcrumb span:hover { text-decoration: underline; }
+  #breadcrumb .sep { color: var(--muted); margin: 0 4px; }
+  #treemap {
+    position: relative;
+    margin: 0 16px 16px;
+    height: 72vh;
+    min-height: 360px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .box {
+    position: absolute;
+    box-sizing: border-box;
+    border: 1px solid rgba(0,0,0,0.25);
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .box .label {
+    position: absolute;
+    top: 2px;
+    left: 4px;
+    right: 4px;
+    pointer-events: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .box .label .name { font-weight: 600; }
+  .box .label .size { display: block; opacity: 0.75; font-size: 11px; }
+  .box.dim { opacity: 0.25; }
+  #tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: #1c1c1a;
+    color: #f5f5f4;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    max-width: 420px;
+    z-index: 50;
+    display: none;
+    white-space: pre-wrap;
+  }
+  #empty {
+    margin: 40px 16px;
+    color: var(--muted);
+  }
+  #warnings {
+    margin: 0 16px 8px;
+    color: #a05a00;
+    display: none;
+    white-space: pre-wrap;
+  }
+  #error {
+    margin: 0 16px 8px;
+    color: #b00020;
+    display: none;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>scalino heap graph viewer</h1>
+  <h2 id="title">load a heap graph dump</h2>
+  <div class="stat" id="subtitle">
+    set <code>SCALANATIVE_HEAP_GRAPH_FILE=/path/to/file</code> when running a scalino program, then load that file below.
+  </div>
+</header>
+<div class="controls">
+  <label>dump file <input type="file" id="fileInput" accept=".txt,.log,.graph,*" /></label>
+  <label>cycle <select id="cycleSelect" disabled></select></label>
+  <label>prefix filter <input type="text" id="filterInput" placeholder="e.g. scala.collection" disabled /></label>
+</div>
+<div id="error"></div>
+<div id="warnings"></div>
+<div id="breadcrumb"></div>
+<div id="treemap"><div id="empty">no dump loaded yet</div></div>
+<div id="tooltip"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  const fileInput = document.getElementById("fileInput");
+  const cycleSelect = document.getElementById("cycleSelect");
+  const filterInput = document.getElementById("filterInput");
+  const treemapEl = document.getElementById("treemap");
+  const breadcrumbEl = document.getElementById("breadcrumb");
+  const titleEl = document.getElementById("title");
+  const subtitleEl = document.getElementById("subtitle");
+  const tooltipEl = document.getElementById("tooltip");
+  const warningsEl = document.getElementById("warnings");
+  const errorEl = document.getElementById("error");
+
+  function showError(err) {
+    console.error(err);
+    errorEl.style.display = "block";
+    errorEl.textContent = "error: " + (err && err.stack ? err.stack : String(err));
+  }
+  function clearError() {
+    errorEl.style.display = "none";
+    errorEl.textContent = "";
+  }
+  function setStatus(text) {
+    subtitleEl.textContent = text;
+  }
+  // yield to the browser so a status message actually paints before the
+  // next (possibly multi-second, on a multi-million-object dump) blocking
+  // pass runs -- plain synchronous code never lets the DOM update mid-call.
+  function yieldToPaint() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  // ---- parsing ------------------------------------------------------------
+  // File format (see gc/immix/Marker.c GraphDump_*):
+  //   --- cycle=N wall_seconds=S ---
+  //   O,<addr_hex>,<size>,<isArray 0|1>,<name>
+  //   E,<from_hex>,<to_hex>
+  //   R,<addr_hex>
+  //   --- end cycle=N total_objects=X total_bytes=Y ---
+  // Cycle blocks are parsed into plain string-keyed structures here (one
+  // pass over the file); the expensive dominator-tree analysis below only
+  // ever runs on the ONE cycle currently selected, not all of them.
+  function parseCycles(text) {
+    const cycles = [];
+    let current = null;
+    const lines = text.split("\n");
+    for (const line of lines) {
+      if (line.startsWith("--- cycle=")) {
+        const m = /cycle=(\d+)\s+wall_seconds=([\d.]+)/.exec(line);
+        current = {
+          cycle: m ? parseInt(m[1], 10) : cycles.length,
+          wallSeconds: m ? parseFloat(m[2]) : null,
+          nodeAddrs: [],
+          nodeSizes: [],
+          nodeIsArray: [],
+          nodeNames: [],
+          edgesFrom: [],
+          edgesTo: [],
+          roots: [],
+          totalObjects: null,
+          totalBytes: null,
+        };
+        continue;
+      }
+      if (line.startsWith("--- end cycle=")) {
+        if (current) {
+          const m = /total_objects=(\d+)\s+total_bytes=(\d+)/.exec(line);
+          if (m) {
+            current.totalObjects = parseInt(m[1], 10);
+            current.totalBytes = parseInt(m[2], 10);
+          }
+          cycles.push(current);
+          current = null;
+        }
+        continue;
+      }
+      if (!current) continue;
+      const c0 = line.charCodeAt(0);
+      if (c0 === 79 /* 'O' */ && line[1] === ",") {
+        const parts = line.split(",");
+        current.nodeAddrs.push(parts[1]);
+        current.nodeSizes.push(parseInt(parts[2], 10) || 0);
+        current.nodeIsArray.push(parts[3] === "1");
+        current.nodeNames.push(parts.length > 4 ? parts.slice(4).join(",") : "(unknown)");
+      } else if (c0 === 69 /* 'E' */ && line[1] === ",") {
+        const parts = line.split(",");
+        current.edgesFrom.push(parts[1]);
+        current.edgesTo.push(parts[2]);
+      } else if (c0 === 82 /* 'R' */ && line[1] === ",") {
+        current.roots.push(line.split(",")[1]);
+      }
+    }
+    return cycles;
+  }
+
+  // ---- dominator tree analysis ---------------------------------------------
+  // Dense-integer-id + typed-array (CSR adjacency) version of the classic
+  // Cooper/Harvey/Kennedy iterative dominator algorithm. A first version of
+  // this used string-keyed Map/Set per node, which is fine for a small test
+  // heap but falls over (multi-minute hang, or an out-of-memory tab crash,
+  // with nothing shown to the user) on a real program's heap -- e.g.
+  // scalino-linkdriver's own build produces ~1.5M live objects and several
+  // million edges. Map/Set entries keyed by ~12-char hex strings carry
+  // massive overhead per entry compared to a plain integer index into a
+  // typed array; CSR (compressed sparse row: a single flat edge array plus
+  // a per-node offset array) avoids both the per-edge object/Set overhead
+  // and the hashing cost entirely.
+  const ROOT_NAME = "(root)";
+
+  // Chunk size for loops that must yield mid-way through analyze() below --
+  // profiled against a real ~1.45M-object/2.9M-edge scalino-linkdriver
+  // dump: the dominator fixpoint loop alone is ~90% of total analysis time
+  // (5 passes x 1.45M nodes, ~2.3s/pass), and running the whole thing as
+  // one synchronous call trips the browser's slow-script watchdog (seen in
+  // practice: Firefox/LibreWolf's "this page is slowing down the browser"
+  // banner) even though it eventually finishes. Yielding every CHUNK
+  // iterations keeps each blocking span well under that threshold
+  // regardless of heap size or machine speed.
+  const ANALYZE_CHUNK = 200000;
+
+  async function analyze(cycle, onProgress) {
+    const nodeCount = cycle.nodeAddrs.length;
+    const rootIdx = nodeCount; // one past the last real object id
+    const totalCount = nodeCount + 1;
+
+    const idOf = new Map();
+    for (let i = 0; i < nodeCount; i++) idOf.set(cycle.nodeAddrs[i], i);
+
+    const sizes = new Float64Array(totalCount);
+    for (let i = 0; i < nodeCount; i++) sizes[i] = cycle.nodeSizes[i];
+    const isArrayFlags = cycle.nodeIsArray; // plain array of booleans, fine
+    const names = cycle.nodeNames.slice();
+    names.push(ROOT_NAME);
+
+    // Integer edge list (root -> declared roots, plus every recorded
+    // pointer field edge), dropping anything referencing an address never
+    // seen in an O line for this cycle (shouldn't normally happen).
+    const edgeFrom = [];
+    const edgeTo = [];
+    for (let i = 0; i < cycle.roots.length; i++) {
+      const t = idOf.get(cycle.roots[i]);
+      if (t !== undefined) { edgeFrom.push(rootIdx); edgeTo.push(t); }
+    }
+    for (let i = 0; i < cycle.edgesFrom.length; i++) {
+      const f = idOf.get(cycle.edgesFrom[i]);
+      const t = idOf.get(cycle.edgesTo[i]);
+      if (f !== undefined && t !== undefined) { edgeFrom.push(f); edgeTo.push(t); }
+    }
+    const edgeCount = edgeFrom.length;
+
+    function buildCSR(fromArr, toArr, n) {
+      const offsets = new Int32Array(n + 1);
+      for (let i = 0; i < fromArr.length; i++) offsets[fromArr[i] + 1]++;
+      for (let i = 0; i < n; i++) offsets[i + 1] += offsets[i];
+      const cursor = offsets.slice();
+      const data = new Int32Array(fromArr.length);
+      for (let i = 0; i < fromArr.length; i++) {
+        const f = fromArr[i];
+        data[cursor[f]++] = toArr[i];
+      }
+      return { offsets, data };
+    }
+    const succ = buildCSR(edgeFrom, edgeTo, totalCount);
+    const pred = buildCSR(edgeTo, edgeFrom, totalCount);
+
+    // Iterative reverse-postorder DFS from root, using an explicit stack of
+    // (node, next-CSR-cursor) pairs instead of recursion (recursion would
+    // blow the JS call stack well before a million nodes).
+    const visited = new Uint8Array(totalCount);
+    const stackNode = new Int32Array(totalCount + 1);
+    const stackCursor = new Int32Array(totalCount + 1);
+    const postorder = new Int32Array(totalCount);
+    let postLen = 0;
+    let sp = 0;
+    stackNode[0] = rootIdx;
+    stackCursor[0] = succ.offsets[rootIdx];
+    visited[rootIdx] = 1;
+    sp = 1;
+    while (sp > 0) {
+      const top = sp - 1;
+      const node = stackNode[top];
+      const end = succ.offsets[node + 1];
+      let cur = stackCursor[top];
+      let descended = false;
+      while (cur < end) {
+        const child = succ.data[cur];
+        cur++;
+        if (!visited[child]) {
+          visited[child] = 1;
+          stackCursor[top] = cur;
+          stackNode[sp] = child;
+          stackCursor[sp] = succ.offsets[child];
+          sp++;
+          descended = true;
+          break;
+        }
+      }
+      if (!descended) {
+        if (cur >= end) {
+          postorder[postLen++] = node;
+          sp--;
+        } else {
+          stackCursor[top] = cur;
+        }
+      }
+    }
+    // reverse postorder in place -> rpo[0] === rootIdx
+    const rpo = postorder.subarray(0, postLen);
+    for (let a = 0, b = rpo.length - 1; a < b; a++, b--) {
+      const t = rpo[a]; rpo[a] = rpo[b]; rpo[b] = t;
+    }
+
+    const idxOfNode = new Int32Array(totalCount).fill(-1);
+    for (let i = 0; i < rpo.length; i++) idxOfNode[rpo[i]] = i;
+
+    const idom = new Int32Array(totalCount).fill(-1);
+    idom[rootIdx] = rootIdx;
+
+    function intersect(a, b) {
+      while (a !== b) {
+        while (idxOfNode[a] > idxOfNode[b]) a = idom[a];
+        while (idxOfNode[b] > idxOfNode[a]) b = idom[b];
+      }
+      return a;
+    }
+
+    let changed = true;
+    let passes = 0;
+    // Counts BOTH outer (per-object) and inner (per-predecessor-edge) work,
+    // not just outer iterations: an object with a very high in-degree (a
+    // shared cache, a common base-class instance, ...) can have a
+    // predecessor list alone larger than ANALYZE_CHUNK, and checking only
+    // the outer loop would let that single iteration block far longer than
+    // intended -- profiled in practice, a real linkdriver heap produced one
+    // multi-second blocking span this way even with outer-only chunking.
+    let opCount = 0;
+    while (changed) {
+      changed = false;
+      passes++;
+      for (let i = 1; i < rpo.length; i++) {
+        const node = rpo[i];
+        const pStart = pred.offsets[node], pEnd = pred.offsets[node + 1];
+        let newIdom = -1;
+        for (let k = pStart; k < pEnd; k++) {
+          const p = pred.data[k];
+          opCount++;
+          if (idxOfNode[p] < 0 || idom[p] === -1) continue;
+          newIdom = newIdom === -1 ? p : intersect(newIdom, p);
+          if (opCount >= ANALYZE_CHUNK) {
+            opCount = 0;
+            if (onProgress) {
+              onProgress(
+                `computing dominator tree — pass ${passes}, ${i.toLocaleString()} / ${(rpo.length - 1).toLocaleString()} objects`
+              );
+            }
+            await yieldToPaint();
+          }
+        }
+        if (newIdom !== -1 && idom[node] !== newIdom) {
+          idom[node] = newIdom;
+          changed = true;
+        }
+        opCount++;
+        if (opCount >= ANALYZE_CHUNK) {
+          opCount = 0;
+          if (onProgress) {
+            onProgress(
+              `computing dominator tree — pass ${passes}, ${i.toLocaleString()} / ${(rpo.length - 1).toLocaleString()} objects`
+            );
+          }
+          await yieldToPaint();
+        }
+      }
+      if (passes > 10000) break; // pathological guard, should never trigger
+    }
+
+    // Dominator-tree children, as an array of small arrays indexed by node
+    // id -- total entries across all of them is bounded by rpo.length, so
+    // this is cheap even at a couple million nodes.
+    const domChildren = new Array(totalCount);
+    for (let i = 0; i < rpo.length; i++) domChildren[rpo[i]] = [];
+    for (let i = 1; i < rpo.length; i++) {
+      const node = rpo[i];
+      const p = idom[node];
+      if (p !== -1) domChildren[p].push(node);
+    }
+
+    const retained = new Float64Array(totalCount);
+    for (let i = rpo.length - 1; i >= 0; i--) {
+      const node = rpo[i];
+      let total = sizes[node];
+      const kids = domChildren[node];
+      for (let k = 0; k < kids.length; k++) total += retained[kids[k]];
+      retained[node] = total;
+    }
+
+    const unreachable = nodeCount - (rpo.length - 1);
+
+    return {
+      rootIdx,
+      nodeCount,
+      addrOf: cycle.nodeAddrs,
+      sizes,
+      isArrayFlags,
+      names,
+      domChildren,
+      retained,
+      unreachable,
+      edgeCount,
+    };
+  }
+
+  // ---- formatting -----------------------------------------------------------
+  function formatBytes(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+    return String(n) + "B";
+  }
+
+  function colorFor(name) {
+    let h = 0;
+    const top = name.split(".")[0] || name;
+    for (let i = 0; i < top.length; i++) {
+      h = (h * 31 + top.charCodeAt(i)) >>> 0;
+    }
+    const hue = h % 360;
+    return `hsl(${hue}, 45%, 78%)`;
+  }
+
+  // ---- squarified treemap layout ---------------------------------------------
+  // items: [{id, value}], returns [{id, x, y, w, h}] within (0,0,W,H)
+  function squarify(items, x, y, w, h) {
+    const result = [];
+    items = items.filter((it) => it.value > 0);
+    if (items.length === 0) return result;
+    const total = items.reduce((s, it) => s + it.value, 0);
+    if (total <= 0) return result;
+    const scale = (w * h) / total;
+    const scaled = items.map((it) => ({ id: it.id, value: it.value * scale }));
+
+    let remaining = scaled.slice();
+    let rx = x, ry = y, rw = w, rh = h;
+
+    function worst(row, sideLen) {
+      let sum = 0, max = -Infinity, min = Infinity;
+      for (const r of row) {
+        sum += r.value;
+        if (r.value > max) max = r.value;
+        if (r.value < min) min = r.value;
+      }
+      if (sum === 0) return Infinity;
+      const s2 = sideLen * sideLen;
+      return Math.max((s2 * max) / (sum * sum), (sum * sum) / (s2 * min));
+    }
+
+    while (remaining.length) {
+      const sideLen = Math.min(rw, rh);
+      let row = [remaining[0]];
+      let bestWorst = worst(row, sideLen);
+      let i = 1;
+      for (; i < remaining.length; i++) {
+        const trial = row.concat([remaining[i]]);
+        const w2 = worst(trial, sideLen);
+        if (w2 <= bestWorst) {
+          row = trial;
+          bestWorst = w2;
+        } else break;
+      }
+      const rowSum = row.reduce((s, r) => s + r.value, 0);
+      if (rw >= rh) {
+        const rowWidth = rowSum / rh;
+        let cy = ry;
+        for (const r of row) {
+          const rowHeight = r.value / rowWidth;
+          result.push({ id: r.id, x: rx, y: cy, w: rowWidth, h: rowHeight });
+          cy += rowHeight;
+        }
+        rx += rowWidth;
+        rw -= rowWidth;
+      } else {
+        const rowHeight = rowSum / rw;
+        let cx = rx;
+        for (const r of row) {
+          const rowWidth = r.value / rowHeight;
+          result.push({ id: r.id, x: cx, y: ry, w: rowWidth, h: rowHeight });
+          cx += rowWidth;
+        }
+        ry += rowHeight;
+        rh -= rowHeight;
+      }
+      remaining = remaining.slice(row.length);
+    }
+    return result;
+  }
+
+  // ---- app state / rendering -------------------------------------------------
+  // `focus`/`path` hold integer node ids now (current.rootIdx for the root),
+  // not the original hex-address strings -- translate to a string only at
+  // the point of display (tooltip, breadcrumb label).
+  let cycles = [];
+  let current = null; // analyze() result for the selected cycle
+  let focus = 0;
+  let path = [0];
+
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files[0];
+    if (!f) return;
+    clearError();
+    cycleSelect.disabled = true;
+    filterInput.disabled = true;
+    titleEl.textContent = "loading…";
+    setStatus(`reading ${formatBytes(f.size)}…`);
+    const reader = new FileReader();
+    reader.onerror = () => showError(reader.error || "file read failed");
+    reader.onload = () => {
+      Promise.resolve()
+        .then(yieldToPaint)
+        .then(() => {
+          setStatus(`parsing ${formatBytes(f.size)}…`);
+        })
+        .then(yieldToPaint)
+        .then(() => {
+          cycles = parseCycles(String(reader.result));
+          if (cycles.length === 0) {
+            titleEl.textContent = "no complete cycle found in file";
+            setStatus("expected \"--- cycle=N ... ---\" / \"--- end cycle=N ... ---\" blocks — is this a SCALANATIVE_HEAP_GRAPH_FILE dump?");
+            return;
+          }
+          cycleSelect.innerHTML = "";
+          cycles.forEach((c, i) => {
+            const opt = document.createElement("option");
+            opt.value = String(i);
+            opt.textContent =
+              "cycle " + c.cycle + (c.wallSeconds != null ? ` (t=${c.wallSeconds.toFixed(1)}s)` : "") +
+              ` — ${c.nodeAddrs.length.toLocaleString()} objects`;
+            cycleSelect.appendChild(opt);
+          });
+          cycleSelect.selectedIndex = cycles.length - 1;
+          cycleSelect.disabled = false;
+          filterInput.disabled = false;
+          return selectCycle(cycles.length - 1);
+        })
+        .catch(showError);
+    };
+    reader.readAsText(f);
+  });
+
+  cycleSelect.addEventListener("change", () => {
+    selectCycle(parseInt(cycleSelect.value, 10)).catch(showError);
+  });
+  filterInput.addEventListener("input", () => render());
+
+  function selectCycle(i) {
+    const cycle = cycles[i];
+    titleEl.textContent = "scalino heap — cycle " + cycle.cycle;
+    setStatus(`analyzing ${cycle.nodeAddrs.length.toLocaleString()} objects, ${cycle.edgesFrom.length.toLocaleString()} edges…`);
+    return yieldToPaint().then(async () => {
+      const t0 = performance.now();
+      current = await analyze(cycle, setStatus);
+      const ms = (performance.now() - t0) | 0;
+      focus = current.rootIdx;
+      path = [current.rootIdx];
+      const totalBytes = cycle.totalBytes != null ? cycle.totalBytes : current.retained[current.rootIdx];
+      setStatus(
+        `${cycle.nodeAddrs.length.toLocaleString()} objects, ${current.edgeCount.toLocaleString()} edges, ` +
+        `${formatBytes(totalBytes)} live (analyzed in ${ms}ms)` +
+        (current.unreachable > 0 ? ` — ${current.unreachable} unreachable from declared roots` : "")
+      );
+      if (current.unreachable > 0) {
+        warningsEl.style.display = "block";
+        warningsEl.textContent = `warning: ${current.unreachable} recorded objects were not reachable from any root edge (dropped from the tree) — may indicate a root-scan path this tool doesn't track yet.`;
+      } else {
+        warningsEl.style.display = "none";
+      }
+      render();
+    });
+  }
+
+  function nameOf(id) {
+    return current.names[id];
+  }
+
+  function matchesFilter(id, filter) {
+    if (!filter) return true;
+    if (nameOf(id).toLowerCase().includes(filter)) return true;
+    const kids = current.domChildren[id] || [];
+    for (let i = 0; i < kids.length; i++) {
+      if (matchesFilter(kids[i], filter)) return true;
+    }
+    return false;
+  }
+
+  // A dominator-tree level can legitimately have hundreds of thousands of
+  // direct children (a real scalino-linkdriver heap: 207,871 objects
+  // directly under root) -- rendering one <div> per box at that count
+  // hangs the DOM regardless of how fast the analysis itself is, and the
+  // vast majority would be sub-pixel slivers anyway. Cap it: keep the
+  // largest boxes, fold the long tail into one aggregate "N more" box
+  // (same idea as the confetti of tiny boxes in the reference screenshot,
+  // just collapsed instead of individually rendered).
+  const MAX_BOXES = 300;
+  const OTHERS_ID = -1;
+
+  function render() {
+    treemapEl.innerHTML = "";
+    if (!current) {
+      treemapEl.innerHTML = '<div id="empty">no dump loaded yet</div>';
+      breadcrumbEl.innerHTML = "";
+      return;
+    }
+    const filter = filterInput.value.trim().toLowerCase();
+    const rect = treemapEl.getBoundingClientRect();
+    const kids = current.domChildren[focus] || [];
+    let children = kids
+      .map((id) => ({ id, value: current.retained[id] || 0 }))
+      .sort((a, b) => b.value - a.value);
+    let othersCount = 0;
+    if (children.length > MAX_BOXES) {
+      const head = children.slice(0, MAX_BOXES - 1);
+      const tail = children.slice(MAX_BOXES - 1);
+      othersCount = tail.length;
+      const otherValue = tail.reduce((s, c) => s + c.value, 0);
+      children = head.concat([{ id: OTHERS_ID, value: otherValue }]);
+    }
+    const placed = squarify(children, 0, 0, rect.width, rect.height);
+    for (const p of placed) {
+      const isOthers = p.id === OTHERS_ID;
+      const name = isOthers ? `(${othersCount.toLocaleString()} more objects)` : current.names[p.id];
+      const shallow = isOthers ? 0 : current.sizes[p.id];
+      const isArray = !isOthers && current.isArrayFlags[p.id];
+      const retained = isOthers ? p.value : current.retained[p.id] || 0;
+      const div = document.createElement("div");
+      div.className = "box";
+      if (!isOthers && filter && !matchesFilter(p.id, filter)) div.classList.add("dim");
+      div.style.left = p.x + "px";
+      div.style.top = p.y + "px";
+      div.style.width = Math.max(0, p.w - 1) + "px";
+      div.style.height = Math.max(0, p.h - 1) + "px";
+      div.style.background = isOthers ? "#d8d8d2" : colorFor(name);
+      if (p.w > 28 && p.h > 14) {
+        const label = document.createElement("div");
+        label.className = "label";
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "name";
+        nameSpan.textContent = name;
+        label.appendChild(nameSpan);
+        if (p.h > 26) {
+          const sizeSpan = document.createElement("span");
+          sizeSpan.className = "size";
+          sizeSpan.textContent = formatBytes(retained);
+          label.appendChild(sizeSpan);
+        }
+        div.appendChild(label);
+      }
+      if (!isOthers) {
+        div.addEventListener("click", () => {
+          if ((current.domChildren[p.id] || []).length === 0) return;
+          focus = p.id;
+          path.push(p.id);
+          render();
+        });
+      }
+      div.addEventListener("mousemove", (ev) => {
+        tooltipEl.style.display = "block";
+        tooltipEl.style.left = ev.clientX + 12 + "px";
+        tooltipEl.style.top = ev.clientY + 12 + "px";
+        if (isOthers) {
+          tooltipEl.textContent =
+            `${othersCount.toLocaleString()} more objects at this level, individually too small to render\n` +
+            `combined retained size: ${formatBytes(retained)} (${retained} B)\n` +
+            `use the prefix filter to narrow down to a specific class`;
+        } else {
+          const addr = p.id === current.rootIdx ? "(root)" : current.addrOf[p.id];
+          tooltipEl.textContent =
+            `${name}\naddress: ${addr}\nshallow size: ${formatBytes(shallow)} (${shallow} B)\nretained size: ${formatBytes(retained)} (${retained} B)` +
+            (isArray ? "\narray" : "");
+        }
+      });
+      div.addEventListener("mouseleave", () => {
+        tooltipEl.style.display = "none";
+      });
+      treemapEl.appendChild(div);
+    }
+    if (placed.length === 0) {
+      const empty = document.createElement("div");
+      empty.id = "empty";
+      empty.textContent = "(no retained children at this level)";
+      treemapEl.appendChild(empty);
+    }
+    renderBreadcrumb();
+  }
+
+  function renderBreadcrumb() {
+    breadcrumbEl.innerHTML = "";
+    path.forEach((id, i) => {
+      if (i > 0) {
+        const sep = document.createElement("span");
+        sep.className = "sep";
+        sep.textContent = "›";
+        breadcrumbEl.appendChild(sep);
+      }
+      const span = document.createElement("span");
+      span.textContent = i === 0 ? "(root)" : nameOf(id);
+      span.addEventListener("click", () => {
+        focus = id;
+        path = path.slice(0, i + 1);
+        render();
+      });
+      breadcrumbEl.appendChild(span);
+    });
+  }
+
+  window.addEventListener("resize", () => {
+    if (current) render();
+  });
+
+  window.addEventListener("error", (ev) => showError(ev.error || ev.message));
+  window.addEventListener("unhandledrejection", (ev) => showError(ev.reason));
+})();
+</script>
+</body>
+</html>
