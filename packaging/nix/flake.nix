@@ -64,12 +64,12 @@
             runHook postInstall
           '';
 
-          # clang is a hard runtime dependency (scala-native always links
+          # clang and llvm-info is a hard runtime dependency (scala-native always links
           # through it, even for a zero-dependency Hello World) -- wrap the
           # binaries so it's on PATH without polluting the caller's own env.
           postFixup = ''
-            wrapProgram "$out/bin/scalino" --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.clang ]}
-            wrapProgram "$out/bin/scalino-lsp" --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.clang ]}
+            wrapProgram "$out/bin/scalino" --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.clang pkgs.llvmPackages.llvm.dev ]}
+            wrapProgram "$out/bin/scalino-lsp" --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.clang pkgs.llvmPackages.llvm.dev ]}
           '';
 
           meta = with pkgs.lib; {
